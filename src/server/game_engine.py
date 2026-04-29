@@ -61,6 +61,20 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
 }
 
 
+MAYOR_ACTION_HEAT: dict[MayorAction, float] = {
+    MayorAction.SURVEIL:        1.0,  # watching — low tension
+    MayorAction.TRACE_MARK:     1.0,  # marking for trace — low tension
+    MayorAction.JAM:            2.0,  # signal disruption — medium
+    MayorAction.CURFEW:         2.0,  # city-wide order — medium
+    MayorAction.AUDIT_PULSE:    2.0,  # system scan — medium
+    MayorAction.SHIVA_THROTTLE: 2.0,  # collective punishment — medium
+    MayorAction.STK_DRAIN:      2.0,  # economic attack — medium
+    MayorAction.ACTION_BAN:     2.0,  # restriction decree — medium
+    MayorAction.JAIL:           3.0,  # full arrest — high tension
+    MayorAction.MOST_WANTED:    3.0,  # public bounty — high tension
+}
+
+
 ACTION_TRADEOFFS: dict[CitizenAction, dict[str, object]] = {
     CitizenAction.SNIFF: {
         "role": "recon",
@@ -153,6 +167,31 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
         for action in CitizenAction
     ]
     jailed = citizen.has_status(StatusEffect.JAILED, state.now)
+    jammed = citizen.has_status(StatusEffect.JAMMED, state.now)
+    sleeping = citizen.mode == CitizenMode.SLEEP
+    cooldown_remaining = max(0.0, citizen.action_cooldown_until - state.now)
+    on_cooldown = cooldown_remaining > 0
+    actions_blocked = jailed or jammed or sleeping or on_cooldown
+
+    if jailed:
+        hint = "JAILED: all actions and mode changes are blocked. You must HOLD until released. Pre-jail mode restores automatically."
+    elif jammed:
+        hint = "JAMMED: active actions are blocked. You may change mode (e.g. switch to MINE to earn STK) or HOLD."
+    elif sleeping:
+        hint = "SLEEPING: active actions are blocked while in SLEEP mode. Switch to MINE or SYNC to act, or HOLD to keep recovering trace."
+    elif on_cooldown:
+        hint = (
+            f"COOLDOWN: action blocked for {cooldown_remaining:.0f}s. Change mode or HOLD — do NOT attempt an action right now."
+        )
+    else:
+        hint = (
+            "STK is your action currency (costs: COVER_TRACKS=100, DECOY_SIGNAL=200, SNIFF=500, JAM_SCAN=1000). "
+            "MINE refills STK fast (+12/s). Only pick from affordable_actions. "
+            "At low trace, prefer impact actions. At high trace, reduce exposure. "
+            "COVER_TRACKS is recovery, not the default aggressive move. "
+            "Switch to MINE if STK is low; switch to SYNC to build SHIVA and reduce trace."
+        )
+
     return {
         "citizen_id": citizen.citizen_id,
         "game_hour": round(state.game_hour, 2),
@@ -167,20 +206,12 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
             "stk": int(citizen.stk),
             "shiva": round(citizen.shiva, 2),
             "trace": round(citizen.trace, 2),
-            "action_cooldown_remaining": max(0, round(citizen.action_cooldown_until - state.now, 2)),
+            "action_cooldown_remaining": round(cooldown_remaining, 2),
         },
-        "allowed_actions": [] if jailed else [action.value for action in CitizenAction],
-        "affordable_actions": [] if jailed else [action.value for action in CitizenAction if citizen.stk >= ACTION_RULES[action]["stk_cost"]],
+        "allowed_actions": [] if actions_blocked else [action.value for action in CitizenAction],
+        "affordable_actions": [] if actions_blocked else [action.value for action in CitizenAction if citizen.stk >= ACTION_RULES[action]["stk_cost"]],
         "action_tradeoffs": action_tradeoffs,
-        "selection_hint": (
-            "JAILED: all actions and mode changes are blocked. You must HOLD until released. Pre-jail mode restores automatically."
-            if jailed else
-            "STK is your action currency (costs: COVER_TRACKS=100, DECOY_SIGNAL=200, SNIFF=500, JAM_SCAN=1000). "
-            "MINE refills STK fast (+12/s). Only pick from affordable_actions. "
-            "At low trace, prefer impact actions. At high trace, reduce exposure. "
-            "COVER_TRACKS is recovery, not the default aggressive move. "
-            "Switch to MINE if STK is low; switch to SYNC to build SHIVA and reduce trace."
-        ),
+        "selection_hint": hint,
         "allowed_modes": [] if jailed else [mode.value for mode in CitizenMode],
     }
 
@@ -220,6 +251,8 @@ def apply_mayor_decree(state: CityState, decree: MayorDecree, *, tick: int = 0) 
             _add_status(citizen, StatusEffect.SURVEILLED, state.now + duration)
         elif decree.action == MayorAction.STK_DRAIN:
             citizen.stk = max(0.0, citizen.stk - 500.0)
+        heat_delta = MAYOR_ACTION_HEAT.get(decree.action, 1.0)
+        state.heat = _clamp(state.heat + heat_delta, 0.0, 100.0)
         events.append(
             GameEvent(
                 event_id=str(uuid.uuid4()),
@@ -227,12 +260,10 @@ def apply_mayor_decree(state: CityState, decree: MayorDecree, *, tick: int = 0) 
                 game_hour=state.game_hour,
                 kind="mayor_decree",
                 message=f"Mayor applied {decree.action.value} to {target_id}.",
-                payload={"target": target_id, "action": decree.action.value, "rationale": decree.rationale},
+                payload={"target": target_id, "action": decree.action.value, "rationale": decree.rationale, "heat_delta": heat_delta},
                 public=True,
             )
         )
-    if decree.action == MayorAction.CURFEW:
-        state.heat = _clamp(state.heat + 2.0, 0.0, 100.0)
     if decree.action == MayorAction.SHIVA_THROTTLE:
         for citizen in state.citizens.values():
             citizen.shiva = max(0.0, citizen.shiva - 5.0)

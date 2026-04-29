@@ -7,7 +7,7 @@ import time
 from src.agents.hermes_runner import HermesAgentRunner
 from src.server.config import Settings
 from src.server.game_engine import advance_tick, apply_citizen_decision, apply_mayor_decree, build_citizen_observation, due_citizens
-from src.server.models import JobKind, to_plain
+from src.server.models import CitizenDecision, DecisionKind, JobKind, StatusEffect, to_plain
 from src.server.postgres_store import PostgresJobQueue, PostgresStore
 
 
@@ -33,10 +33,15 @@ async def run_game_loop(
                 tick_counter[0] += 1
                 result = advance_tick(state, seconds=settings.server_tick_seconds, tick=tick_counter[0])
 
+                server_held: list[tuple] = []
                 for citizen in due_citizens(state, min_decision_interval=settings.min_decision_interval):
                     if citizen.citizen_id in already_queued:
-                        continue  # already has a pending/running job — skip
+                        continue
                     citizen.last_decision_at = state.now
+                    if citizen.has_status(StatusEffect.JAILED, state.now) or citizen.has_status(StatusEffect.JAMMED, state.now):
+                        # server-side auto-HOLD: don't burn an LLM call on a blocked citizen
+                        server_held.append((citizen.citizen_id, "jailed" if citizen.has_status(StatusEffect.JAILED, state.now) else "jammed"))
+                        continue
                     to_enqueue.append((
                         citizen.citizen_id,
                         citizen.behavior,
@@ -44,8 +49,16 @@ async def run_game_loop(
                     ))
 
                 await store.save_state(state)
-                if result.events:
-                    await store.append_events(result.events, game_id)
+                all_events = list(result.events)
+                for cid, reason in server_held:
+                    hold_result = apply_citizen_decision(
+                        state,
+                        CitizenDecision(citizen_id=cid, kind=DecisionKind.HOLD, rationale=f"server: {reason}"),
+                        tick=tick_counter[0],
+                    )
+                    all_events.extend(hold_result.events)
+                if all_events:
+                    await store.append_events(all_events, game_id)
 
             for cid, behavior, obs in to_enqueue:
                 await queue.enqueue(JobKind.CITIZEN_DECISION, {
