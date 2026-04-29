@@ -64,6 +64,7 @@ class Settings:
     season_seconds: int
     mayor_tick_seconds: int
     server_tick_seconds: float
+    min_decision_interval: float
     database_url: str
     database_url_unpooled: str
 
@@ -93,6 +94,7 @@ class Settings:
             season_seconds=max(60, _env_int("SEASON_SECONDS", env_file, 600)),
             mayor_tick_seconds=max(1, _env_int("MAYOR_TICK_SECONDS", env_file, 10)),
             server_tick_seconds=max(0.1, _env_float("SERVER_TICK_SECONDS", env_file, 1.0)),
+            min_decision_interval=max(1.0, _env_float("MIN_DECISION_INTERVAL", env_file, 10.0)),
             database_url=database_url,
             database_url_unpooled=_env("DATABASE_URL_UNPOOLED", env_file),
         )

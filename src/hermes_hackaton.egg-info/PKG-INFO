@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: hermes-hackaton
+Version: 0.1.0
+Summary: Hermes-backed multi-agent OptimiCity hackathon simulation.
+Requires-Python: >=3.11
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn[standard]>=0.30
+Requires-Dist: psycopg[binary]>=3.2

@@ -69,7 +69,7 @@ class Citizen:
     behavior: str = "aggressive"
     mode: CitizenMode = CitizenMode.MINE
     queued_mode: CitizenMode | None = None
-    stk: float = 25.0
+    stk: float = 2500.0
     shiva: float = 35.0
     trace: float = 10.0
     last_decision_at: float = -999.0

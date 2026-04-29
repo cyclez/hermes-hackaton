@@ -28,7 +28,7 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
         "caught_heat_delta": 1.4,
         "trace_success": 6.0,
         "trace_caught": 14.0,
-        "stk_cost": 1.0,
+        "stk_cost": 500,
         "cooldown": 5.0,
     },
     CitizenAction.JAM_SCAN: {
@@ -37,7 +37,7 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
         "caught_heat_delta": 1.8,
         "trace_success": 8.0,
         "trace_caught": 18.0,
-        "stk_cost": 2.0,
+        "stk_cost": 1000,
         "cooldown": 7.0,
     },
     CitizenAction.DECOY_SIGNAL: {
@@ -46,7 +46,7 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
         "caught_heat_delta": 0.9,
         "trace_success": 4.0,
         "trace_caught": 10.0,
-        "stk_cost": 1.0,
+        "stk_cost": 200,
         "cooldown": 4.0,
     },
     CitizenAction.COVER_TRACKS: {
@@ -55,7 +55,7 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
         "caught_heat_delta": 0.6,
         "trace_success": -12.0,
         "trace_caught": 5.0,
-        "stk_cost": 1.0,
+        "stk_cost": 100,
         "cooldown": 4.0,
     },
 }
@@ -145,12 +145,14 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
     active_statuses = [status.effect.value for status in citizen.active_statuses(state.now)]
     action_tradeoffs = [
         f"{action.value}: role={ACTION_TRADEOFFS[action]['role']}, "
+        f"stk_cost={ACTION_RULES[action]['stk_cost']:.0f}, "
         f"impact={ACTION_TRADEOFFS[action]['impact']}, "
         f"risk={ACTION_TRADEOFFS[action]['risk']}, "
         f"trace={ACTION_TRADEOFFS[action]['trace_pressure']}, "
         f"use={ACTION_TRADEOFFS[action]['best_when']}"
         for action in CitizenAction
     ]
+    jailed = citizen.has_status(StatusEffect.JAILED, state.now)
     return {
         "citizen_id": citizen.citizen_id,
         "game_hour": round(state.game_hour, 2),
@@ -162,18 +164,24 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
             "mode": citizen.mode.value,
             "queued_mode": citizen.queued_mode.value if citizen.queued_mode else None,
             "statuses": active_statuses,
-            "stk": round(citizen.stk, 2),
+            "stk": int(citizen.stk),
             "shiva": round(citizen.shiva, 2),
             "trace": round(citizen.trace, 2),
             "action_cooldown_remaining": max(0, round(citizen.action_cooldown_until - state.now, 2)),
         },
-        "allowed_actions": [action.value for action in CitizenAction],
+        "allowed_actions": [] if jailed else [action.value for action in CitizenAction],
+        "affordable_actions": [] if jailed else [action.value for action in CitizenAction if citizen.stk >= ACTION_RULES[action]["stk_cost"]],
         "action_tradeoffs": action_tradeoffs,
         "selection_hint": (
+            "JAILED: all actions and mode changes are blocked. You must HOLD until released. Pre-jail mode restores automatically."
+            if jailed else
+            "STK is your action currency (costs: COVER_TRACKS=100, DECOY_SIGNAL=200, SNIFF=500, JAM_SCAN=1000). "
+            "MINE refills STK fast (+12/s). Only pick from affordable_actions. "
             "At low trace, prefer impact actions. At high trace, reduce exposure. "
-            "COVER_TRACKS is recovery, not the default aggressive move."
+            "COVER_TRACKS is recovery, not the default aggressive move. "
+            "Switch to MINE if STK is low; switch to SYNC to build SHIVA and reduce trace."
         ),
-        "allowed_modes": [mode.value for mode in CitizenMode],
+        "allowed_modes": [] if jailed else [mode.value for mode in CitizenMode],
     }
 
 
@@ -204,13 +212,14 @@ def apply_mayor_decree(state: CityState, decree: MayorDecree, *, tick: int = 0) 
             continue
         duration = max(1, decree.duration_seconds)
         if decree.action == MayorAction.JAIL:
+            citizen.queued_mode = citizen.mode  # save pre-jail mode for restoration
             _add_status(citizen, StatusEffect.JAILED, state.now + duration)
         elif decree.action == MayorAction.JAM:
             _add_status(citizen, StatusEffect.JAMMED, state.now + duration)
         elif decree.action in {MayorAction.SURVEIL, MayorAction.TRACE_MARK, MayorAction.MOST_WANTED}:
             _add_status(citizen, StatusEffect.SURVEILLED, state.now + duration)
         elif decree.action == MayorAction.STK_DRAIN:
-            citizen.stk = max(0.0, citizen.stk - 5.0)
+            citizen.stk = max(0.0, citizen.stk - 500.0)
         events.append(
             GameEvent(
                 event_id=str(uuid.uuid4()),
@@ -234,10 +243,10 @@ def _apply_mode_change(state: CityState, citizen: Citizen, decision: CitizenDeci
     result = EngineResult()
     if decision.mode is None:
         return _invalid_decision(state, citizen, "Mode change did not include target mode.", tick)
-    citizen.queued_mode = decision.mode
-    if not citizen.has_status(StatusEffect.JAILED, state.now):
-        citizen.mode = decision.mode
-        citizen.queued_mode = None
+    if citizen.has_status(StatusEffect.JAILED, state.now):
+        return _invalid_decision(state, citizen, "Jailed: no mode changes. Pre-jail mode restores on release.", tick)
+    citizen.mode = decision.mode
+    citizen.queued_mode = None
     result.events.append(
         GameEvent(
             event_id=str(uuid.uuid4()),
@@ -383,17 +392,21 @@ def _invalid_decision(state: CityState, citizen: Citizen, reason: str, tick: int
 
 def _apply_passive_mode_effects(state: CityState, seconds: float) -> None:
     for citizen in state.citizens.values():
+        if citizen.has_status(StatusEffect.JAILED, state.now):
+            continue  # jailed: full freeze, nothing accumulates
+
         if citizen.mode == CitizenMode.MINE:
-            citizen.stk += 0.12 * seconds
+            citizen.stk += 12 * seconds
             citizen.trace += 0.025 * seconds
         elif citizen.mode == CitizenMode.SYNC:
-            citizen.stk += 0.05 * seconds
+            citizen.stk += 5 * seconds
             citizen.shiva += 0.12 * seconds
             citizen.trace -= 0.015 * seconds
         elif citizen.mode == CitizenMode.SLEEP:
-            citizen.stk += 0.015 * seconds
+            citizen.stk += 1.5 * seconds
             citizen.trace -= 0.09 * seconds
             citizen.shiva -= 0.025 * seconds
+
         citizen.stk = _clamp(citizen.stk, 0.0, 9999.0)
         citizen.shiva = _clamp(citizen.shiva, 0.0, 100.0)
         citizen.trace = _clamp(citizen.trace, 0.0, 100.0)
