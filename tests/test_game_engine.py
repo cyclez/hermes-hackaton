@@ -94,8 +94,13 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(len(result.dossiers), 1)
         self.assertTrue(result.events[0].payload["caught"])
 
-    def test_jailed_citizen_can_queue_sleep_and_resolves_after_release(self) -> None:
+    def test_jailed_citizen_keeps_pre_jail_mode_and_rejects_mode_change(self) -> None:
         state = create_initial_state(citizen_count=1)
+        citizen = state.citizens["citizen-001"]
+        citizen.mode = CitizenMode.SYNC
+        start_heat = state.heat
+        start_trace = citizen.trace
+
         apply_mayor_decree(
             state,
             MayorDecree(
@@ -106,7 +111,7 @@ class GameEngineTests(unittest.TestCase):
             ),
         )
 
-        apply_citizen_decision(
+        result = apply_citizen_decision(
             state,
             CitizenDecision(
                 citizen_id="citizen-001",
@@ -114,16 +119,18 @@ class GameEngineTests(unittest.TestCase):
                 mode=CitizenMode.SLEEP,
             ),
         )
-        citizen = state.citizens["citizen-001"]
 
         self.assertTrue(citizen.has_status(StatusEffect.JAILED, state.now))
-        self.assertEqual(citizen.queued_mode, CitizenMode.SLEEP)
-        self.assertNotEqual(citizen.mode, CitizenMode.SLEEP)
+        self.assertEqual(citizen.mode, CitizenMode.SYNC)
+        self.assertEqual(citizen.queued_mode, CitizenMode.SYNC)
+        self.assertEqual(result.events[0].kind, "invalid_decision")
+        self.assertAlmostEqual(state.heat, start_heat + 3.2)
+        self.assertEqual(citizen.trace, start_trace + 1.0)
 
         advance_tick(state, seconds=4)
 
         self.assertFalse(citizen.has_status(StatusEffect.JAILED, state.now))
-        self.assertEqual(citizen.mode, CitizenMode.SLEEP)
+        self.assertEqual(citizen.mode, CitizenMode.SYNC)
         self.assertIsNone(citizen.queued_mode)
 
 

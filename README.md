@@ -1,29 +1,61 @@
 # hermes-hackaton
 
-Early-stage hackathon project built on top of Hermes Agent.
+Hermes-backed hackathon simulation/game built around isolated citizen agents and a competing Mayor agent in one shared city state.
 
-## Scope
+## Current Repo Behavior
 
-The project target is a local web-based game/simulation where:
-- multiple Hermes-backed player agents inhabit the same world
-- those agents are treated as separate in-world actors rather than one shared mind
-- all player agents use the same common doctrine for how to play
-- private state remains isolated per agent
-- they face a shared LLM-controlled enemy/opposing force
+- The FastAPI app in `src/server/app.py` starts a fresh game at process startup and launches in-process background loops for:
+  - the server tick/game loop
+  - citizen worker loops
+  - the Mayor loop
+- Citizens run through isolated Hermes `AIAgent` instances rooted in `.runtime/hermes-profiles/`.
+- Citizen decisions are queued in Postgres job rows and consumed by citizen workers.
+- Mayor decisions currently run on a timed loop every `MAYOR_TICK_SECONDS`; they are not queued as Mayor jobs yet.
+- The Vite/React UI polls `/api/*` every few seconds and renders:
+  - city header / Heat state
+  - citizen grid
+  - Mayor panel
+  - event feeds
+  - recent agent decision logs
 
-The goal is not a generic multi-agent demo. The goal is a playable, inspectable game layer where multiple isolated agents react differently inside the same environment.
+## Runtime Defaults
 
-## Current Status
+The checked-in default profile is `.env.example`:
 
-This repository is still in architecture and adaptation phase. The scope is fixed, but the final game loop and implementation are still in progress.
+- `LLM_PROVIDER=openrouter`
+- `CITIZENS_MODEL=moonshotai/kimi-k2.6`
+- `MAYOR_MODEL=moonshotai/kimi-k2.6`
+- `CITIZEN_COUNT=5`
+- `CITIZEN_WORKER_COUNT=5`
+- `MAX_CONCURRENT_LLM_CALLS=5`
+- `LLM_MAX_TOKENS=2048`
 
-## Repository State
+Ollama remains supported by switching `LLM_PROVIDER=ollama` and setting the model names accordingly.
 
-This repo currently contains project scaffolding and planning material.
+## Run Locally
 
-Planned canonical structure:
-- `docs/` — public project documentation and architecture notes
-- `src/` — runtime implementation
-- `services/` — optional service-specific modules if the project grows beyond a single runtime
+1. Create `.env` from `.env.example` and fill at least:
+   - `DATABASE_URL`
+   - provider credentials if using OpenRouter
+2. Start the backend:
 
-Some local working files used for private process, prompting, and internal agentic operations are intentionally not part of the public project surface.
+```bash
+uvicorn src.server.app:app --port 8000
+```
+
+3. Start the UI:
+
+```bash
+cd src/ui
+npm run dev
+```
+
+4. Open `http://localhost:5173`
+
+## Verification
+
+Run the local test suite with:
+
+```bash
+./.venv/bin/python -m unittest discover -s tests -q
+```

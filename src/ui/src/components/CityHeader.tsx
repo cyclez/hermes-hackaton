@@ -7,6 +7,8 @@ interface Props {
   serverTick: number
   lastLlmAt: number | null
   onRestart?: () => void
+  onStop?: () => void
+  serverStopped?: boolean
 }
 
 function PulseDot({ active, color }: { active: boolean; color: string }) {
@@ -84,7 +86,7 @@ function LlmIndicator({ lastLlmAt }: { lastLlmAt: number | null }) {
   )
 }
 
-export function CityHeader({ state, serverTick, lastLlmAt, onRestart }: Props) {
+export function CityHeader({ state, serverTick, lastLlmAt, onRestart, onStop, serverStopped = false }: Props) {
   const [busy, setBusy] = useState<'restart' | 'stop' | null>(null)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
 
@@ -109,12 +111,12 @@ export function CityHeader({ state, serverTick, lastLlmAt, onRestart }: Props) {
     if (!window.confirm('Stop the server? The UI will disconnect.')) return
     setBusy('stop')
     setActionMsg('Stopping…')
+    onStop?.()
     try {
       await stopServer()
       setActionMsg('Server stopped.')
     } catch (e) {
-      setActionMsg(`Error: ${e}`)
-      setBusy(null)
+      setActionMsg('Server stopped.')
     }
   }
 
@@ -130,7 +132,10 @@ export function CityHeader({ state, serverTick, lastLlmAt, onRestart }: Props) {
 
   let statusLabel = 'RUNNING'
   let statusColor = '#60a5fa'
-  if (state.is_finished) {
+  if (serverStopped) {
+    statusLabel = 'SERVER STOPPED'
+    statusColor = '#94a3b8'
+  } else if (state.is_finished) {
     statusLabel = state.winner === 'citizens' ? '🏆 CITIZENS WIN' : '🏛 MAYOR WINS'
     statusColor = state.winner === 'citizens' ? '#22c55e' : '#f87171'
   }

@@ -10,11 +10,12 @@ class SettingsTests(unittest.TestCase):
         settings = Settings.load(".env.example")
 
         self.assertEqual(settings.llm_provider, "openrouter")
-        self.assertEqual(settings.citizens_model, "moonshotai/kimi-k2.6")
+        self.assertEqual(settings.citizens_model, "moonshotai/kimi-k2-0905")
         self.assertEqual(settings.mayor_model, "moonshotai/kimi-k2.6")
-        self.assertEqual(settings.llm_max_tokens, 220)
+        self.assertEqual(settings.llm_max_tokens, 2048)
         self.assertEqual(settings.openrouter_reasoning_effort, "none")
         self.assertEqual(settings.citizen_count, 5)
+        self.assertEqual(settings.citizen_worker_count, 5)
         self.assertEqual(settings.season_seconds, 600)
 
 

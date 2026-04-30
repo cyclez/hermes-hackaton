@@ -2,16 +2,29 @@ import { useEffect, useState } from 'react'
 import type { AgentTurn, CityState, GameEvent, MayorDecree } from './api'
 import { fetchAgentLogs, fetchEvents, fetchMayorDecree, fetchState } from './api'
 import { AgentConsoles } from './components/AgentConsoles'
+import { DecisionLogPage } from './components/DecisionLogPage'
 import { CityHeader } from './components/CityHeader'
 import { CitizenGrid } from './components/CitizenGrid'
 import { Feed } from './components/Feed'
 import { MayorPanel } from './components/MayorPanel'
 
 const CITIZEN_KINDS = ['citizen_action', 'mode_change', 'citizen_jailed', 'citizen_released']
-const MAYOR_KINDS   = ['mayor_decree', 'invalid_decision']
-const SYSTEM_KINDS  = ['server_tick', 'heat_change', 'game_start', 'game_end']
+const MAYOR_KINDS = ['mayor_decree', 'invalid_decision']
+const SYSTEM_KINDS = ['server_tick', 'heat_change', 'game_start', 'game_end']
 
-export default function App() {
+function usePathname() {
+  const [pathname, setPathname] = useState(window.location.pathname)
+
+  useEffect(() => {
+    const onPop = () => setPathname(window.location.pathname)
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  return pathname
+}
+
+function HomePage() {
   const [state, setState] = useState<CityState | null>(null)
   const [citizenEvents, setCitizenEvents] = useState<GameEvent[]>([])
   const [mayorEvents, setMayorEvents] = useState<GameEvent[]>([])
@@ -21,8 +34,10 @@ export default function App() {
   const [serverTick, setServerTick] = useState(0)
   const [lastLlmAt, setLastLlmAt] = useState<number | null>(null)
   const [agentLogs, setAgentLogs] = useState<Record<string, AgentTurn[]>>({})
+  const [serverStopped, setServerStopped] = useState(false)
 
   const poll = async () => {
+    if (serverStopped) return
     try {
       const [s, ce, me, se, d, al] = await Promise.all([
         fetchState(),
@@ -51,10 +66,11 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (serverStopped) return
     poll()
     const id = setInterval(poll, 2000)
     return () => clearInterval(id)
-  }, [])
+  }, [serverStopped])
 
   if (error && !state) {
     return (
@@ -87,6 +103,7 @@ export default function App() {
         lastLlmAt={lastLlmAt}
         onRestart={() => {
           // Immediately wipe stale state so the UI shows fresh data
+          setServerStopped(false)
           setAgentLogs({})
           setCitizenEvents([])
           setMayorEvents([])
@@ -95,6 +112,8 @@ export default function App() {
           setLastLlmAt(null)
           poll()
         }}
+        onStop={() => setServerStopped(true)}
+        serverStopped={serverStopped}
       />
 
       {/* Content row: fills remaining height, no overflow at this level */}
@@ -130,6 +149,35 @@ export default function App() {
           <Feed label="System Events"   events={systemEvents}  accent="#475569" />
         </div>
       </div>
+
+      <a
+        href="/decision-logs"
+        style={{
+          position: 'fixed',
+          left: 16,
+          bottom: 16,
+          background: '#111827',
+          border: '1px solid #334155',
+          borderRadius: 6,
+          color: '#93c5fd',
+          textDecoration: 'none',
+          padding: '8px 10px',
+          fontSize: 12,
+          fontWeight: 600,
+        }}
+      >
+        Decision logs
+      </a>
     </div>
   )
+}
+
+export default function App() {
+  const pathname = usePathname()
+
+  if (pathname === '/decision-logs') {
+    return <DecisionLogPage />
+  }
+
+  return <HomePage />
 }

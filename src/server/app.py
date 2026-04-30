@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import subprocess
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -16,6 +18,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 from src.agents.hermes_runner import HermesAgentRunner
 from src.agents.profiles import ensure_profiles
 from src.server.config import Settings
+from src.server.game_finalizer import GameFinalizer
 from src.server.game_engine import create_initial_state
 from src.server.game_loop import run_citizen_worker_loop, run_game_loop, run_mayor_worker_loop
 from src.server.models import to_plain
@@ -30,12 +33,72 @@ _CITIZEN_BEHAVIORS = [
 ]
 
 
+def _process_command(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return ""
+    return result.stdout.strip()
+
+
+def _stop_target_pid() -> tuple[int, str]:
+    current_pid = os.getpid()
+    parent_pid = os.getppid()
+    parent_command = _process_command(parent_pid)
+    if "uvicorn" in parent_command and "--reload" in parent_command:
+        return parent_pid, "uvicorn_reload_parent"
+    return current_pid, "current_process"
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _stop_server_processes() -> None:
+    time.sleep(0.2)
+    current_pid = os.getpid()
+    target_pid, reason = _stop_target_pid()
+    print(f"[app] Stop target pid={target_pid} reason={reason}", flush=True)
+
+    if target_pid != current_pid:
+        try:
+            os.kill(target_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        time.sleep(0.7)
+        if _pid_is_alive(target_pid):
+            try:
+                os.kill(target_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    try:
+        os.kill(current_pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    # If graceful shutdown is blocked by in-flight executor/LLM threads, exit.
+    time.sleep(1.5)
+    os._exit(0)
+
+
 def _launch_game_tasks(
     store: PostgresStore,
     queue: PostgresJobQueue,
     runner: HermesAgentRunner,
     settings: Settings,
     game_id: str,
+    finalizer: GameFinalizer,
 ) -> tuple[list[asyncio.Task], asyncio.Lock, list[int]]:
     """Create and start all background tasks for a game session."""
     game_lock = asyncio.Lock()
@@ -43,13 +106,13 @@ def _launch_game_tasks(
 
     tasks: list[asyncio.Task] = [
         asyncio.create_task(
-            run_game_loop(store, game_id, queue, settings, tick_counter, game_lock),
+            run_game_loop(store, game_id, queue, settings, tick_counter, game_lock, finalizer),
             name="game_loop",
         ),
         asyncio.create_task(
             run_mayor_worker_loop(store, runner, settings,
                                   asyncio.Semaphore(settings.max_concurrent_llm_calls),
-                                  game_id, game_lock),
+                                  game_id, game_lock, finalizer),
             name="mayor_worker",
         ),
     ]
@@ -58,7 +121,7 @@ def _launch_game_tasks(
             run_citizen_worker_loop(
                 store, queue, runner, settings,
                 asyncio.Semaphore(settings.max_concurrent_llm_calls),
-                f"worker-{i}", game_lock,
+                f"worker-{i}", game_lock, finalizer,
             ),
             name=f"citizen_worker_{i}",
         ))
@@ -117,11 +180,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         game_id = await _init_game(store, queue, settings)
         runner = HermesAgentRunner(settings)
-        tasks, _, _ = _launch_game_tasks(store, queue, runner, settings, game_id)
+        finalizer = GameFinalizer(log_store=runner.log_store)
+        tasks, _, _ = _launch_game_tasks(store, queue, runner, settings, game_id, finalizer)
 
         app.state.store = store
         app.state.queue = queue
         app.state.runner = runner
+        app.state.finalizer = finalizer
         app.state.settings = settings
         app.state.game_id = game_id
         app.state.tasks = tasks
@@ -161,8 +226,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         d["game_hour"] = state.game_hour
         d["is_finished"] = state.is_finished
         d["winner"] = (
-            "citizens" if state.heat <= 0.0
-            else "mayor" if (state.heat >= 100.0 or state.elapsed >= state.season_seconds)
+            "mayor" if state.heat >= 100.0
+            else "citizens" if state.is_finished
             else None
         )
         return d
@@ -190,13 +255,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def agent_logs() -> dict:
         return app.state.runner._agent_logs
 
+    @app.get("/api/decision-log-runs")
+    async def decision_log_runs() -> dict[str, Any]:
+        return {
+            "current_game_id": app.state.game_id,
+            "runs": app.state.runner.log_store.list_runs(app.state.game_id),
+        }
+
+    @app.get("/api/decision-logs")
+    async def decision_logs(
+        game_id: str | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=2000),
+        role: str = Query(default=""),
+        agent_id: str = Query(default=""),
+    ) -> list[dict[str, Any]]:
+        return app.state.runner.log_store.read_entries(
+            game_id or app.state.game_id,
+            limit=limit,
+            role=role or None,
+            agent_id=agent_id or None,
+        )
+
     @app.post("/api/server/stop")
     async def server_stop() -> dict[str, str]:
         """Gracefully stop the server process."""
-        async def _kill():
-            await asyncio.sleep(0.2)
-            os.kill(os.getpid(), signal.SIGTERM)
-        asyncio.create_task(_kill())
+        threading.Thread(target=_stop_server_processes, name="server-stop", daemon=True).start()
         print("[app] Stop requested via API.", flush=True)
         return {"status": "stopping"}
 
@@ -212,18 +295,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         game_id = await _init_game(app.state.store, app.state.queue, app.state.settings)
         app.state.game_id = game_id
 
-        # Full runner reset: clear histories, logs, and cached agent instances
-        # so the new game gets fresh agents with no stale state
-        runner = app.state.runner
-        runner._citizen_histories.clear()
-        runner._mayor_history = []
-        runner._agent_logs.clear()
-        runner._citizen_agents.clear()
-        runner._mayor_agent = None
+        # Full runner reset so the new game gets fresh agents with no stale state
+        app.state.runner.reset()
 
         tasks, _, _ = _launch_game_tasks(
             app.state.store, app.state.queue, app.state.runner,
-            app.state.settings, game_id,
+            app.state.settings, game_id, app.state.finalizer,
         )
         app.state.tasks = tasks
 
