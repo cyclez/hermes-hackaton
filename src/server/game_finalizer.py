@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.server.decision_log_store import DecisionLogStore
+from src.server.game_learning_evidence import build_citizen_learning_evidence, build_mayor_learning_evidence
 from src.server.models import Citizen, CityState, to_plain
+
+if TYPE_CHECKING:
+    from src.agents.hermes_runner import HermesAgentRunner
 
 
 class FinalizerStore(Protocol):
@@ -23,15 +28,21 @@ class GameFinalizer:
         self,
         *,
         log_store: DecisionLogStore,
+        runner: HermesAgentRunner | None = None,
         root: Path | None = None,
         recent_event_limit: int = 25,
         recent_dossier_limit: int = 10,
+        learning_event_limit: int = 2000,
+        learning_dossier_limit: int = 2000,
     ) -> None:
         self.log_store = log_store
+        self.runner = runner
         self.root = root or (Path(".runtime") / "finalized-games")
         self.root.mkdir(parents=True, exist_ok=True)
         self.recent_event_limit = recent_event_limit
         self.recent_dossier_limit = recent_dossier_limit
+        self.learning_event_limit = learning_event_limit
+        self.learning_dossier_limit = learning_dossier_limit
 
     async def finalize_if_needed(self, store: FinalizerStore, game_id: str, state: CityState) -> bool:
         if not state.is_finished:
@@ -55,10 +66,14 @@ class GameFinalizer:
             f"[finalizer] finalized game {game_id} winner={packet['winner']} reason={packet['reason']}",
             flush=True,
         )
+        self._schedule_learning_if_configured(store, game_id, packet)
         return True
 
     def is_finalized(self, game_id: str) -> bool:
         return self._marker_path(game_id).exists()
+
+    def is_learning_started(self, game_id: str) -> bool:
+        return self._learning_started_path(game_id).exists()
 
     async def _build_packet(self, store: FinalizerStore, game_id: str, state: CityState) -> dict[str, Any]:
         finalized_at = time.time()
@@ -93,6 +108,98 @@ class GameFinalizer:
 
     def _marker_path(self, game_id: str) -> Path:
         return self._game_dir(game_id) / "finalized.json"
+
+    def _learning_started_path(self, game_id: str) -> Path:
+        return self._game_dir(game_id) / "learning-started.json"
+
+    def _learning_completed_path(self, game_id: str) -> Path:
+        return self._game_dir(game_id) / "learning-completed.json"
+
+    def _learning_failed_path(self, game_id: str) -> Path:
+        return self._game_dir(game_id) / "learning-failed.json"
+
+    def _schedule_learning_if_configured(self, store: FinalizerStore, game_id: str, packet: dict[str, Any]) -> None:
+        if self.runner is None:
+            return
+        if packet.get("reason") not in {"heat_maxed", "heat_depleted", "timeout_survived"}:
+            return
+        started_path = self._learning_started_path(game_id)
+        if started_path.exists() or self._learning_completed_path(game_id).exists():
+            return
+        self._write_json_atomic(started_path, {
+            "game_id": game_id,
+            "learning_started_at": time.time(),
+            "reason": packet.get("reason"),
+        })
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._run_learning_pass(store, game_id, packet), name=f"learning:{game_id}")
+        except RuntimeError:
+            self._write_json_atomic(self._learning_failed_path(game_id), {
+                "game_id": game_id,
+                "failed_at": time.time(),
+                "error": "no running event loop for learning pass",
+            })
+
+    async def _run_learning_pass(self, store: FinalizerStore, game_id: str, packet: dict[str, Any]) -> None:
+        assert self.runner is not None
+        loop = asyncio.get_running_loop()
+        try:
+            events = await store.get_events(game_id, limit=self.learning_event_limit)
+            dossiers = await store.get_recent_dossiers(game_id, limit=self.learning_dossier_limit)
+            decision_logs = self.log_store.read_entries(game_id, limit=0)
+            results: list[dict[str, Any]] = []
+
+            for snapshot in packet.get("citizen_snapshots") or []:
+                citizen_id = snapshot.get("citizen_id")
+                behavior = snapshot.get("behavior") or "aggressive"
+                if not citizen_id:
+                    continue
+                print(
+                    f"[finalizer] learning citizen {citizen_id} behavior={behavior} game={game_id}",
+                    flush=True,
+                )
+                evidence = build_citizen_learning_evidence(citizen_id, packet, decision_logs, events)
+                result = await loop.run_in_executor(
+                    None,
+                    lambda cid=citizen_id, beh=behavior, ev=evidence: self.runner.learn_citizen_from_game(
+                        cid, beh, ev, game_id
+                    ),
+                )
+                print(
+                    f"[finalizer] learned citizen {citizen_id} ok={bool(result.get('ok'))} game={game_id}",
+                    flush=True,
+                )
+                results.append({"agent_id": citizen_id, "role": "citizen_learning", "ok": bool(result.get("ok"))})
+
+            mayor_evidence = build_mayor_learning_evidence(packet, decision_logs, events, dossiers)
+            mayor_behavior = mayor_evidence.get("behavior") or "optimizer"
+            print(
+                f"[finalizer] learning mayor behavior={mayor_behavior} game={game_id}",
+                flush=True,
+            )
+            mayor_result = await loop.run_in_executor(
+                None,
+                lambda ev=mayor_evidence, beh=mayor_behavior: self.runner.learn_mayor_from_game(beh, ev, game_id),
+            )
+            print(
+                f"[finalizer] learned mayor ok={bool(mayor_result.get('ok'))} game={game_id}",
+                flush=True,
+            )
+            results.append({"agent_id": "mayor", "role": "mayor_learning", "ok": bool(mayor_result.get("ok"))})
+            self._write_json_atomic(self._learning_completed_path(game_id), {
+                "game_id": game_id,
+                "learning_completed_at": time.time(),
+                "results": results,
+            })
+            print(f"[finalizer] learning completed for game {game_id}", flush=True)
+        except Exception as exc:
+            self._write_json_atomic(self._learning_failed_path(game_id), {
+                "game_id": game_id,
+                "failed_at": time.time(),
+                "error": str(exc),
+            })
+            print(f"[finalizer] learning failed for game {game_id}: {exc}", flush=True)
 
     def _write_json_atomic(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

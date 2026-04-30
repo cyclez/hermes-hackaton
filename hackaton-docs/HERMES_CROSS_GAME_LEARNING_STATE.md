@@ -69,6 +69,50 @@ The server should compute evidence, not lessons.
 
 No `lesson_candidates` in the first implementation. The evidence should be factual and compact. Hermes decides what, if anything, is worth saving.
 
+## Evidence Visibility Contract
+
+Training evidence must not break the in-game information boundary. Citizens do not receive an omniscient post-game packet.
+
+Citizen learning evidence is limited to what that citizen could legitimately know during or after the game:
+
+1. Their own decision logs: prompt/observation, chosen action/mode/HOLD, and rationale.
+2. Their own private state snapshots: STK, SHIVA, trace, mode, queued mode, statuses, and cooldown.
+3. Their own allowed and affordable actions at decision time.
+4. Their own server catch result only when knowable through their own/public event stream.
+5. Public Heat values.
+6. Public final game result: winner and server-coded reason only.
+7. Mayor actions that visibly affected them through their own statuses, such as JAILED, JAMMED, or SURVEILLED.
+8. Their own blocked states, such as JAILED, JAMMED, SLEEP, or cooldown.
+
+Citizen learning evidence must not include:
+
+1. Other citizens' private state.
+2. Other citizens' decisions unless the public feed already exposed them in-game.
+3. Mayor private context or dossiers.
+4. Mayor rationale.
+5. Full decree target lists.
+6. Hidden server catch probabilities if not exposed to the citizen.
+7. Dossiers or caught evidence about other citizens.
+8. Aggregates across all citizens that reveal hidden behavior.
+9. Effective-Mayor-strategy analysis.
+10. Omniscient post-game causal explanations.
+
+Mayor learning evidence may include adversarial-control evidence visible to the Mayor role:
+
+1. Its own decrees and rationales.
+2. Dossiers and caught evidence.
+3. Citizen snapshots already included in Mayor context.
+4. Public or recent citizen actions.
+5. Heat trajectory.
+6. Final game result.
+7. Aggregates based only on Mayor-visible information.
+
+Implementation consequence:
+
+- `build_citizen_learning_evidence(citizen_id, ...)` must build a strict private/visible-only packet.
+- `build_mayor_learning_evidence(...)` may build a broader Mayor-visible adversarial packet.
+- There must be no shared omniscient packet sent to citizens.
+
 ## Learning Prompt Shape
 
 ```text

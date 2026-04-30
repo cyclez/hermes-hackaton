@@ -39,13 +39,14 @@ function HomePage() {
   const poll = async () => {
     if (serverStopped) return
     try {
+      const running = !state?.is_finished
       const [s, ce, me, se, d, al] = await Promise.all([
         fetchState(),
-        fetchEvents(40, CITIZEN_KINDS),
-        fetchEvents(20, MAYOR_KINDS),
+        running ? fetchEvents(40, CITIZEN_KINDS) : Promise.resolve(citizenEvents),
+        running ? fetchEvents(20, MAYOR_KINDS) : Promise.resolve(mayorEvents),
         fetchEvents(20, SYSTEM_KINDS),
-        fetchMayorDecree(),
-        fetchAgentLogs(),
+        running ? fetchMayorDecree() : Promise.resolve(decree),
+        running ? fetchAgentLogs() : Promise.resolve(agentLogs),
       ])
       setState(s)
       setCitizenEvents(ce)
@@ -67,10 +68,28 @@ function HomePage() {
 
   useEffect(() => {
     if (serverStopped) return
-    poll()
-    const id = setInterval(poll, 2000)
-    return () => clearInterval(id)
-  }, [serverStopped])
+    let cancelled = false
+    let timeoutId: number | null = null
+
+    const schedule = (delayMs: number) => {
+      timeoutId = window.setTimeout(async () => {
+        await poll()
+        if (cancelled) return
+        schedule(state?.is_finished ? 15000 : 2000)
+      }, delayMs)
+    }
+
+    void poll().then(() => {
+      if (!cancelled) {
+        schedule(state?.is_finished ? 15000 : 2000)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      if (timeoutId !== null) window.clearTimeout(timeoutId)
+    }
+  }, [serverStopped, state?.is_finished])
 
   if (error && !state) {
     return (

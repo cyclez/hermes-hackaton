@@ -99,6 +99,21 @@ class _FakeRunner:
         )
 
 
+class _FakeLearningRunner(_FakeRunner):
+    def __init__(self, log_store: DecisionLogStore) -> None:
+        super().__init__()
+        self.log_store = log_store
+        self.learning_calls: list[tuple[str, str, dict]] = []
+
+    def learn_citizen_from_game(self, citizen_id: str, behavior: str, evidence: dict, game_id: str) -> dict:
+        self.learning_calls.append(("citizen", citizen_id, evidence))
+        return {"ok": True, "final_response": "citizen learned"}
+
+    def learn_mayor_from_game(self, behavior: str, evidence: dict, game_id: str) -> dict:
+        self.learning_calls.append(("mayor", "mayor", evidence))
+        return {"ok": True, "final_response": "mayor learned"}
+
+
 def _settings() -> Settings:
     return Settings(
         llm_provider="openrouter",
@@ -220,6 +235,70 @@ class GameFinalizerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(packet["recent_dossiers"]), 1)
             self.assertEqual(marker["packet_path"], str(packet_path))
             self.assertEqual(marker["finalized_at"], packet["finalized_at"])
+
+    async def test_finalizer_schedules_learning_pass_once_when_runner_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_store = DecisionLogStore(root / "logs")
+            log_store.append("learning-game", {
+                "log_id": "citizen-log",
+                "game_id": "learning-game",
+                "ts": 123.0,
+                "role": "citizen",
+                "agent_id": "citizen-001",
+                "behavior": "stealth_first",
+                "situation": {
+                    "observation": {
+                        "global": {"heat": 50.0},
+                        "private": {"trace": 32.0, "stk": 500, "statuses": ["SURVEILLED"]},
+                        "allowed_actions": ["COVER_TRACKS"],
+                        "affordable_actions": ["COVER_TRACKS"],
+                    }
+                },
+                "final": {"payload": {"kind": "ACTION", "action": "COVER_TRACKS", "rationale": "self visible"}},
+            })
+            log_store.append("learning-game", {
+                "log_id": "mayor-log",
+                "game_id": "learning-game",
+                "ts": 124.0,
+                "role": "mayor",
+                "agent_id": "mayor",
+                "behavior": "optimizer",
+                "situation": {"heat": 55.0},
+                "final": {"payload": {"action": "SURVEIL", "targets": ["citizen-001"], "rationale": "mayor visible"}},
+            })
+            runner = _FakeLearningRunner(log_store)
+            finalizer = GameFinalizer(log_store=log_store, runner=runner, root=root / "finalized")
+            state = create_initial_state(citizen_count=1, season_seconds=60)
+            state.game_id = "learning-game"
+            state.citizens["citizen-001"].behavior = "stealth_first"
+            state.started_at = 0.0
+            state.now = 60.0
+            store = _StubStore(events=[
+                GameEvent(
+                    event_id="event-1",
+                    tick=1,
+                    game_hour=10.0,
+                    kind="mayor_decree",
+                    message="Mayor pressure affected citizen.",
+                    payload={"targets": ["citizen-001"], "action": "SURVEIL", "rationale": "should be stripped for citizen"},
+                    public=True,
+                ),
+            ])
+
+            first = await finalizer.finalize_if_needed(store, state.game_id, state)
+            second = await finalizer.finalize_if_needed(store, state.game_id, state)
+            await _wait_until(lambda: (root / "finalized" / state.game_id / "learning-completed.json").exists())
+
+            self.assertTrue(first)
+            self.assertFalse(second)
+            self.assertTrue(finalizer.is_learning_started(state.game_id))
+            self.assertEqual([call[0] for call in runner.learning_calls], ["citizen", "mayor"])
+            citizen_evidence = runner.learning_calls[0][2]
+            self.assertEqual(citizen_evidence["agent_id"], "citizen-001")
+            self.assertNotIn("should be stripped", repr(citizen_evidence))
+            completed = json.loads((root / "finalized" / state.game_id / "learning-completed.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(completed["results"]), 2)
 
     async def test_restart_before_terminal_does_not_finalize_old_game(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

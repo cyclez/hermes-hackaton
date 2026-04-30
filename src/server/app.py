@@ -180,7 +180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         game_id = await _init_game(store, queue, settings)
         runner = HermesAgentRunner(settings)
-        finalizer = GameFinalizer(log_store=runner.log_store)
+        finalizer = GameFinalizer(log_store=runner.log_store, runner=runner)
         tasks, _, _ = _launch_game_tasks(store, queue, runner, settings, game_id, finalizer)
 
         app.state.store = store
