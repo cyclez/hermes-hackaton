@@ -230,7 +230,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else "citizens" if state.is_finished
             else None
         )
+        d["training"] = app.state.finalizer.learning_status(app.state.game_id, state_finished=state.is_finished)
         return d
+
+    @app.get("/api/training-status")
+    async def training_status(game_id: str | None = Query(default=None)) -> dict[str, Any]:
+        target_game_id = game_id or app.state.game_id
+        state_finished: bool | None = None
+        if target_game_id == app.state.game_id:
+            state = await app.state.store.load_state(app.state.game_id)
+            state_finished = state.is_finished
+        return app.state.finalizer.learning_status(target_game_id, state_finished=state_finished)
 
     @app.get("/api/events")
     async def get_events(

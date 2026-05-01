@@ -186,10 +186,16 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
     else:
         hint = (
             "STK is your action currency (costs: COVER_TRACKS=100, DECOY_SIGNAL=200, SNIFF=500, JAM_SCAN=1000). "
-            "MINE refills STK fast (+12/s). Only pick from affordable_actions. "
-            "At low trace, prefer impact actions. At high trace, reduce exposure. "
+            "MINE refills STK fast (+12/s) but is the exposed posture. SYNC builds SHIVA and lowers catch exposure. "
+            "Trace raises catch risk continuously. SHIVA lowers it continuously. "
+            "SURVEILLED is a direct danger signal. GHOSTED is a stealth benefit after successful SNIFF, not a penalty. "
+            "Only pick from affordable_actions. "
+            "At low trace, do not assume risky actions are safe if SHIVA is still low or you are still in MINE. "
+            "If SHIVA is below 40 and mode is MINE, prefer DECOY_SIGNAL or SYNC unless the upside clearly justifies risk. "
+            "At high trace, reduce exposure. "
             "COVER_TRACKS is recovery, not the default aggressive move. "
-            "Switch to MINE if STK is low; switch to SYNC to build SHIVA and reduce trace."
+            "Switch to MINE if STK is low; switch to SYNC to build SHIVA and reduce trace. "
+            "CURFEW is city pressure, not a personal action block or direct catch modifier."
         )
 
     return {

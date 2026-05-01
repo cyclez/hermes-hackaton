@@ -7,21 +7,48 @@ interface Props {
 
 export function CitizenGrid({ state }: Props) {
   const citizens = Object.values(state.citizens).sort((a, b) => a.citizen_id.localeCompare(b.citizen_id))
+  const blockedCount = citizens.filter((citizen) =>
+    citizen.statuses.some((status) => status.effect === 'JAILED' || status.effect === 'JAMMED'),
+  ).length
+  const queuedCount = citizens.filter((citizen) => citizen.queued_mode !== null).length
+  const avgTrace =
+    citizens.length > 0
+      ? citizens.reduce((sum, citizen) => sum + citizen.trace, 0) / citizens.length
+      : 0
 
   return (
-    <div>
-      <h2 style={{ color: '#94a3b8', fontSize: 13, fontWeight: 600, margin: '0 0 12px', textTransform: 'uppercase', letterSpacing: 1 }}>
-        Citizens ({citizens.length})
-      </h2>
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-        gap: 12,
-      }}>
-        {citizens.map(c => (
-          <CitizenCard key={c.citizen_id} citizen={c} now={state.now} />
+    <section className="panel citizen-section">
+      <div className="citizen-section__header">
+        <div>
+          <div className="panel-kicker">Citizen network</div>
+          <h2 className="panel-title">Citizens</h2>
+        </div>
+
+        <div className="citizen-strip">
+          <div className="citizen-strip__metric">
+            <span className="citizen-strip__value">{citizens.length}</span>
+            <span className="citizen-strip__label">citizens</span>
+          </div>
+          <div className="citizen-strip__metric">
+            <span className="citizen-strip__value">{blockedCount}</span>
+            <span className="citizen-strip__label">blocked</span>
+          </div>
+          <div className="citizen-strip__metric">
+            <span className="citizen-strip__value">{queuedCount}</span>
+            <span className="citizen-strip__label">queued</span>
+          </div>
+          <div className="citizen-strip__metric">
+            <span className="citizen-strip__value">{avgTrace.toFixed(1)}</span>
+            <span className="citizen-strip__label">avg trace</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="citizen-grid">
+        {citizens.map((citizen) => (
+          <CitizenCard key={citizen.citizen_id} citizen={citizen} now={state.now} />
         ))}
       </div>
-    </div>
+    </section>
   )
 }

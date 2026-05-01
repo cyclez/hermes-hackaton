@@ -43,6 +43,7 @@ class GameFinalizer:
         self.recent_dossier_limit = recent_dossier_limit
         self.learning_event_limit = learning_event_limit
         self.learning_dossier_limit = learning_dossier_limit
+        self._learning_progress: dict[str, dict[str, Any]] = {}
 
     async def finalize_if_needed(self, store: FinalizerStore, game_id: str, state: CityState) -> bool:
         if not state.is_finished:
@@ -74,6 +75,80 @@ class GameFinalizer:
 
     def is_learning_started(self, game_id: str) -> bool:
         return self._learning_started_path(game_id).exists()
+
+    def learning_status(self, game_id: str, *, state_finished: bool | None = None) -> dict[str, Any]:
+        current = self._learning_progress.get(game_id)
+        if current is not None:
+            return dict(current)
+
+        started = self._read_json_if_exists(self._learning_started_path(game_id))
+        completed = self._read_json_if_exists(self._learning_completed_path(game_id))
+        failed = self._read_json_if_exists(self._learning_failed_path(game_id))
+
+        if completed is not None:
+            results = list(completed.get("results") or [])
+            started_at = started.get("learning_started_at") if started else None
+            return {
+                "game_id": game_id,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed.get("learning_completed_at"),
+                "failed_at": None,
+                "completed_count": len(results),
+                "total_count": len(results),
+                "current_role": None,
+                "current_agent_id": None,
+                "current_behavior": None,
+                "error": None,
+                "results": results,
+            }
+
+        if failed is not None:
+            return {
+                "game_id": game_id,
+                "status": "failed",
+                "started_at": started.get("learning_started_at") if started else None,
+                "completed_at": None,
+                "failed_at": failed.get("failed_at"),
+                "completed_count": int((started or {}).get("completed_count") or 0),
+                "total_count": int((started or {}).get("total_count") or 0),
+                "current_role": None,
+                "current_agent_id": None,
+                "current_behavior": None,
+                "error": str(failed.get("error") or "learning pass failed"),
+                "results": [],
+            }
+
+        if started is not None:
+            return {
+                "game_id": game_id,
+                "status": "pending",
+                "started_at": started.get("learning_started_at"),
+                "completed_at": None,
+                "failed_at": None,
+                "completed_count": int(started.get("completed_count") or 0),
+                "total_count": int(started.get("total_count") or 0),
+                "current_role": None,
+                "current_agent_id": None,
+                "current_behavior": None,
+                "error": None,
+                "results": [],
+            }
+
+        return {
+            "game_id": game_id,
+            "status": "pending" if state_finished else "idle",
+            "started_at": None,
+            "completed_at": None,
+            "failed_at": None,
+            "completed_count": 0,
+            "total_count": 0,
+            "current_role": None,
+            "current_agent_id": None,
+            "current_behavior": None,
+            "error": None,
+            "results": [],
+        }
 
     async def _build_packet(self, store: FinalizerStore, game_id: str, state: CityState) -> dict[str, Any]:
         finalized_at = time.time()
@@ -126,11 +201,29 @@ class GameFinalizer:
         started_path = self._learning_started_path(game_id)
         if started_path.exists() or self._learning_completed_path(game_id).exists():
             return
-        self._write_json_atomic(started_path, {
+        total_count = len(packet.get("citizen_snapshots") or []) + 1
+        started_payload = {
             "game_id": game_id,
             "learning_started_at": time.time(),
             "reason": packet.get("reason"),
-        })
+            "completed_count": 0,
+            "total_count": total_count,
+        }
+        self._write_json_atomic(started_path, started_payload)
+        self._set_learning_progress(
+            game_id,
+            status="pending",
+            started_at=started_payload["learning_started_at"],
+            completed_at=None,
+            failed_at=None,
+            completed_count=0,
+            total_count=total_count,
+            current_role=None,
+            current_agent_id=None,
+            current_behavior=None,
+            error=None,
+            results=[],
+        )
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._run_learning_pass(store, game_id, packet), name=f"learning:{game_id}")
@@ -140,21 +233,51 @@ class GameFinalizer:
                 "failed_at": time.time(),
                 "error": "no running event loop for learning pass",
             })
+            self._set_learning_progress(
+                game_id,
+                status="failed",
+                completed_at=None,
+                failed_at=time.time(),
+                current_role=None,
+                current_agent_id=None,
+                current_behavior=None,
+                error="no running event loop for learning pass",
+                results=[],
+            )
 
     async def _run_learning_pass(self, store: FinalizerStore, game_id: str, packet: dict[str, Any]) -> None:
         assert self.runner is not None
         loop = asyncio.get_running_loop()
+        total_count = len(packet.get("citizen_snapshots") or []) + 1
         try:
             events = await store.get_events(game_id, limit=self.learning_event_limit)
             dossiers = await store.get_recent_dossiers(game_id, limit=self.learning_dossier_limit)
             decision_logs = self.log_store.read_entries(game_id, limit=0)
             results: list[dict[str, Any]] = []
+            self._set_learning_progress(
+                game_id,
+                status="running",
+                total_count=total_count,
+                completed_count=0,
+                current_role=None,
+                current_agent_id=None,
+                current_behavior=None,
+                error=None,
+                results=[],
+            )
 
             for snapshot in packet.get("citizen_snapshots") or []:
                 citizen_id = snapshot.get("citizen_id")
                 behavior = snapshot.get("behavior") or "aggressive"
                 if not citizen_id:
                     continue
+                self._set_learning_progress(
+                    game_id,
+                    status="running",
+                    current_role="citizen_learning",
+                    current_agent_id=citizen_id,
+                    current_behavior=behavior,
+                )
                 print(
                     f"[finalizer] learning citizen {citizen_id} behavior={behavior} game={game_id}",
                     flush=True,
@@ -171,9 +294,21 @@ class GameFinalizer:
                     flush=True,
                 )
                 results.append({"agent_id": citizen_id, "role": "citizen_learning", "ok": bool(result.get("ok"))})
+                self._set_learning_progress(
+                    game_id,
+                    completed_count=len(results),
+                    results=list(results),
+                )
 
             mayor_evidence = build_mayor_learning_evidence(packet, decision_logs, events, dossiers)
             mayor_behavior = mayor_evidence.get("behavior") or "optimizer"
+            self._set_learning_progress(
+                game_id,
+                status="running",
+                current_role="mayor_learning",
+                current_agent_id="mayor",
+                current_behavior=mayor_behavior,
+            )
             print(
                 f"[finalizer] learning mayor behavior={mayor_behavior} game={game_id}",
                 flush=True,
@@ -187,18 +322,43 @@ class GameFinalizer:
                 flush=True,
             )
             results.append({"agent_id": "mayor", "role": "mayor_learning", "ok": bool(mayor_result.get("ok"))})
+            completed_at = time.time()
             self._write_json_atomic(self._learning_completed_path(game_id), {
                 "game_id": game_id,
-                "learning_completed_at": time.time(),
+                "learning_completed_at": completed_at,
                 "results": results,
             })
+            self._set_learning_progress(
+                game_id,
+                status="completed",
+                completed_at=completed_at,
+                failed_at=None,
+                completed_count=len(results),
+                total_count=total_count,
+                current_role=None,
+                current_agent_id=None,
+                current_behavior=None,
+                error=None,
+                results=list(results),
+            )
             print(f"[finalizer] learning completed for game {game_id}", flush=True)
         except Exception as exc:
+            failed_at = time.time()
             self._write_json_atomic(self._learning_failed_path(game_id), {
                 "game_id": game_id,
-                "failed_at": time.time(),
+                "failed_at": failed_at,
                 "error": str(exc),
             })
+            self._set_learning_progress(
+                game_id,
+                status="failed",
+                completed_at=None,
+                failed_at=failed_at,
+                current_role=None,
+                current_agent_id=None,
+                current_behavior=None,
+                error=str(exc),
+            )
             print(f"[finalizer] learning failed for game {game_id}: {exc}", flush=True)
 
     def _write_json_atomic(self, path: Path, payload: dict[str, Any]) -> None:
@@ -208,6 +368,17 @@ class GameFinalizer:
             json.dump(payload, fh, ensure_ascii=True, indent=2, sort_keys=True)
             fh.write("\n")
         temp_path.replace(path)
+
+    def _set_learning_progress(self, game_id: str, **updates: Any) -> None:
+        current = dict(self._learning_progress.get(game_id) or {"game_id": game_id})
+        current.update(updates)
+        self._learning_progress[game_id] = current
+
+    @staticmethod
+    def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 def terminal_outcome(state: CityState) -> tuple[str, str]:

@@ -1,57 +1,81 @@
+import type { CSSProperties } from 'react'
 import type { MayorDecree } from '../api'
+import { formatClockTime, formatTokenLabel, hexToRgba } from '../ui'
 
 interface Props {
   decree: MayorDecree | null
 }
 
 const ACTION_COLORS: Record<string, string> = {
-  SURVEIL: '#f97316',
-  ARREST: '#ef4444',
-  JAM_SERVER: '#eab308',
-  BRIBE: '#a78bfa',
-  RELEASE: '#22c55e',
-  PARDON: '#22c55e',
+  SURVEIL: '#ff9f5c',
+  ARREST: '#ff6c67',
+  JAM_SERVER: '#f2c66c',
+  BRIBE: '#b0a0ff',
+  RELEASE: '#7fd8a8',
+  PARDON: '#7fd8a8',
 }
 
 export function MayorPanel({ decree }: Props) {
+  const accent = ACTION_COLORS[decree?.action ?? ''] ?? '#ffb457'
+  const panelStyle = {
+    ['--mayor-accent' as string]: accent,
+  } as CSSProperties
+
   return (
-    <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, padding: 16, flexShrink: 0 }}>
-      <h2 style={{ color: '#94a3b8', fontSize: 13, fontWeight: 600, margin: '0 0 12px', textTransform: 'uppercase', letterSpacing: 1 }}>
-        Mayor
-      </h2>
+    <section className="panel mayor-panel" style={panelStyle}>
+      <div className="panel-kicker">Mayor desk</div>
+      <div className="mayor-panel__header">
+        <div>
+          <h2 className="panel-title">Latest decree</h2>
+          <p className="panel-copy">Authority actions and rationale appear here as the simulation updates.</p>
+        </div>
+        <span
+          className="chip"
+          style={{
+            color: accent,
+            background: hexToRgba(accent, 0.12),
+            borderColor: hexToRgba(accent, 0.34),
+          }}
+        >
+          mayor
+        </span>
+      </div>
 
       {!decree ? (
-        <p style={{ color: '#475569', fontSize: 13, margin: 0 }}>No decrees yet</p>
+        <div className="mayor-panel__empty">
+          No decrees yet. When the Mayor acts, the active order, targets, and justification will be pinned here.
+        </div>
       ) : (
         <>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <span style={{
-              background: ACTION_COLORS[decree.action] ?? '#475569',
-              color: '#fff',
-              borderRadius: 4,
-              padding: '2px 10px',
-              fontSize: 12,
-              fontWeight: 700,
-            }}>{decree.action}</span>
-            {decree.targets.map(t => (
-              <span key={t} style={{ color: '#cbd5e1', fontSize: 12, background: '#334155', borderRadius: 3, padding: '1px 6px' }}>{t}</span>
+          <div className="mayor-panel__hero">
+            <span
+              className="mayor-panel__action"
+              style={{
+                color: accent,
+                background: hexToRgba(accent, 0.14),
+                borderColor: hexToRgba(accent, 0.34),
+              }}
+            >
+              {formatTokenLabel(decree.action)}
+            </span>
+            <div className="mayor-panel__hero-meta">
+              <span>{decree.targets.length} target{decree.targets.length === 1 ? '' : 's'}</span>
+              <span>{decree.duration_seconds > 0 ? `${decree.duration_seconds}s window` : 'instant effect'}</span>
+              <span>{formatClockTime(decree.created_at)}</span>
+            </div>
+          </div>
+
+          <div className="mayor-panel__targets">
+            {decree.targets.map((target) => (
+              <span key={target} className="chip chip--neutral">
+                {target}
+              </span>
             ))}
           </div>
 
-          <p style={{ color: '#94a3b8', fontSize: 12, margin: '0 0 8px', lineHeight: 1.5 }}>
-            {decree.rationale}
-          </p>
-
-          {decree.duration_seconds > 0 && (
-            <div style={{ color: '#64748b', fontSize: 11 }}>duration: {decree.duration_seconds}s</div>
-          )}
-          {decree.created_at && (
-            <div style={{ color: '#475569', fontSize: 10, marginTop: 4 }}>
-              {new Date(decree.created_at).toLocaleTimeString()}
-            </div>
-          )}
+          <div className="mayor-panel__rationale">{decree.rationale}</div>
         </>
       )}
-    </div>
+    </section>
   )
 }

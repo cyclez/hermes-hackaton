@@ -1,20 +1,18 @@
+import type { CSSProperties } from 'react'
 import type { GameEvent } from '../api'
+import { formatTokenLabel } from '../ui'
 
 const KIND_COLORS: Record<string, string> = {
-  citizen_action:   '#60a5fa',
-  mode_change:      '#2dd4bf',
-  citizen_jailed:   '#ef4444',
-  citizen_released: '#22c55e',
-  mayor_decree:     '#fb923c',
-  invalid_decision: '#f87171',
-  heat_change:      '#a78bfa',
-  game_start:       '#facc15',
-  game_end:         '#facc15',
-  server_tick:      '#334155',
-}
-
-const KIND_TEXT: Record<string, string> = {
-  server_tick: '#4b5563',
+  citizen_action: '#58b8ff',
+  mode_change: '#4cd2b7',
+  citizen_jailed: '#ff6c67',
+  citizen_released: '#7fd8a8',
+  mayor_decree: '#ffb457',
+  invalid_decision: '#ff8f8f',
+  heat_change: '#b0a0ff',
+  game_start: '#e8d075',
+  game_end: '#e8d075',
+  server_tick: '#8ea3bb',
 }
 
 interface Props {
@@ -24,57 +22,42 @@ interface Props {
 }
 
 export function Feed({ label, events, accent }: Props) {
-  return (
-    <div style={{
-      background: '#1e293b',
-      border: '1px solid #334155',
-      borderRadius: 8,
-      padding: 14,
-      display: 'flex',
-      flexDirection: 'column',
-      flex: 1,        // take equal share of parent height
-      minHeight: 0,   // allow shrinking below content size
-    }}>
-      <div style={{
-        fontSize: 11,
-        fontWeight: 700,
-        textTransform: 'uppercase',
-        letterSpacing: 1,
-        color: accent,
-        marginBottom: 10,
-      }}>{label}</div>
+  const feedStyle = {
+    ['--feed-accent' as string]: accent,
+  } as CSSProperties
 
-      <div style={{
-        overflowY: 'auto',
-        flex: 1,          // fills the remaining space inside the card
-        minHeight: 0,     // required for overflow-y to work inside flex
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 4,
-      }}>
+  return (
+    <section className="panel feed-panel" style={feedStyle}>
+      <div className="feed-panel__header">
+        <div>
+          <div className="panel-kicker">Live feed</div>
+          <div className="panel-title panel-title--small">{label}</div>
+        </div>
+        <span className="chip" style={{ color: accent, borderColor: `${accent}55` }}>
+          {events.length}
+        </span>
+      </div>
+
+      <div className="feed-list">
         {events.length === 0 && (
-          <span style={{ color: '#374151', fontSize: 12 }}>No events yet…</span>
+          <span className="feed-empty">No events yet.</span>
         )}
-        {events.map(e => (
-          <div key={e.event_id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-            <span style={{
-              color: KIND_COLORS[e.kind] ?? '#94a3b8',
-              fontSize: 9,
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              minWidth: 80,
-              paddingTop: 2,
-              flexShrink: 0,
-              letterSpacing: 0.5,
-            }}>{e.kind.replace(/_/g, ' ')}</span>
-            <span style={{
-              color: KIND_TEXT[e.kind] ?? '#cbd5e1',
-              fontSize: 11,
-              lineHeight: 1.4,
-            }}>{e.message}</span>
+        {events.map((event) => (
+          <div key={event.event_id} className="feed-item">
+            <div className="feed-item__meta">
+              <span>T{event.tick}</span>
+              <span>H{event.game_hour.toFixed(1)}</span>
+            </div>
+            <span
+              className="feed-item__kind"
+              style={{ color: KIND_COLORS[event.kind] ?? accent }}
+            >
+              {formatTokenLabel(event.kind)}
+            </span>
+            <span className="feed-item__message">{event.message}</span>
           </div>
         ))}
       </div>
-    </div>
+    </section>
   )
 }

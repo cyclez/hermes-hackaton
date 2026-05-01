@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { AgentTurn } from '../api'
+import { formatBehaviorLabel } from '../ui'
 
 interface Props {
   logs: Record<string, AgentTurn[]>
@@ -12,7 +13,7 @@ const BEHAVIOR: Record<string, string> = {
   'citizen-003': 'opportunistic',
   'citizen-004': 'stealth_first',
   'citizen-005': 'resource_maximizer',
-  'mayor': 'optimizer',
+  mayor: 'optimizer',
 }
 
 function TurnCard({ turn }: { turn: AgentTurn }) {
@@ -20,131 +21,103 @@ function TurnCard({ turn }: { turn: AgentTurn }) {
   const ts = new Date(turn.ts * 1000).toLocaleTimeString()
 
   return (
-    <div style={{
-      fontFamily: 'monospace',
-      fontSize: 11,
-      borderBottom: '1px solid #1e293b',
-      paddingBottom: 10,
-      marginBottom: 10,
-    }}>
-      {/* Turn header */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
-        <span style={{ color: '#475569', flexShrink: 0 }}>{ts}</span>
-        <span style={{
-          background: turn.ok ? '#14532d' : '#450a0a',
-          color: turn.ok ? '#86efac' : '#fca5a5',
-          borderRadius: 3,
-          padding: '0 6px',
-          fontSize: 10,
-          fontWeight: 700,
-        }}>{turn.ok ? '✓ OK' : '✗ ERR'}</span>
-        {turn.repair && (
-          <span style={{ color: '#f59e0b', fontSize: 10, fontWeight: 700 }}>REPAIR</span>
-        )}
-        <span style={{ color: '#94a3b8', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {turn.decision}
-        </span>
-        <button
-          onClick={() => setExpanded(e => !e)}
-          style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: 11, padding: 0 }}
-        >{expanded ? '▲' : '▼'}</button>
+    <article className="turn-card">
+      <div className="turn-card__header">
+        <div className="turn-card__meta">
+          <span>{ts}</span>
+          <span
+            className="chip"
+            style={{
+              color: turn.ok ? '#7fd8a8' : '#ff8f8f',
+              background: turn.ok ? 'rgba(38, 102, 69, 0.28)' : 'rgba(122, 37, 37, 0.28)',
+              borderColor: turn.ok ? 'rgba(127, 216, 168, 0.24)' : 'rgba(255, 108, 103, 0.24)',
+            }}
+          >
+            {turn.ok ? 'ok' : 'error'}
+          </span>
+          {turn.repair && <span className="chip chip--neutral">repair</span>}
+        </div>
+        <button onClick={() => setExpanded((value) => !value)} className="turn-card__toggle">
+          {expanded ? 'Collapse' : 'Expand'}
+        </button>
       </div>
 
-      {/* Prompt */}
-      <div style={{ marginBottom: 4 }}>
-        <span style={{ color: '#22d3ee', marginRight: 6 }}>▶ PROMPT</span>
-        <span style={{ color: '#64748b' }}>
-          {expanded ? turn.prompt : turn.prompt.slice(0, 120) + (turn.prompt.length > 120 ? '…' : '')}
+      <div className="turn-card__decision">{turn.decision}</div>
+
+      <div className="turn-card__preview">
+        <span className="turn-card__label">prompt</span>
+        <span>
+          {expanded ? turn.prompt : turn.prompt.slice(0, 180) + (turn.prompt.length > 180 ? '…' : '')}
         </span>
       </div>
 
-      {/* Response */}
-      <div>
-        <span style={{ color: '#a3e635', marginRight: 6 }}>◀ RESPONSE</span>
-        <span style={{ color: '#cbd5e1', whiteSpace: expanded ? 'pre-wrap' : 'nowrap', overflow: 'hidden', display: 'block', maxWidth: '100%', textOverflow: expanded ? 'unset' : 'ellipsis' }}>
+      <div className="turn-card__preview">
+        <span className="turn-card__label">response</span>
+        <span className={expanded ? 'turn-card__response turn-card__response--expanded' : 'turn-card__response'}>
           {turn.response || '(empty)'}
         </span>
       </div>
-    </div>
+
+      {expanded && (
+        <div className="turn-card__expanded">
+          <div>
+            <div className="detail-block__label">Full prompt</div>
+            <pre className="json-block">{turn.prompt}</pre>
+          </div>
+          <div>
+            <div className="detail-block__label">Full response</div>
+            <pre className="json-block">{turn.response || '(empty)'}</pre>
+          </div>
+        </div>
+      )}
+    </article>
   )
 }
 
 export function AgentConsoles({ logs }: Props) {
   const [activeTab, setActiveTab] = useState('citizen-001')
   const turns = [...(logs[activeTab] ?? [])].reverse()
+  const totalTurns = Object.values(logs).reduce((sum, items) => sum + items.length, 0)
 
   return (
-    <div style={{
-      background: '#0d1117',
-      border: '1px solid #1e293b',
-      borderRadius: 8,
-      display: 'flex',
-      flexDirection: 'column',
-      overflow: 'hidden',
-      marginTop: 16,
-    }}>
-      {/* Tab bar */}
-      <div style={{
-        display: 'flex',
-        borderBottom: '1px solid #1e293b',
-        overflowX: 'auto',
-        flexShrink: 0,
-      }}>
-        {AGENT_IDS.map(id => {
+    <section className="panel consoles-panel">
+      <div className="consoles-panel__header">
+        <div>
+          <div className="panel-kicker">Agent consoles</div>
+          <h2 className="panel-title">Prompt and response traces</h2>
+        </div>
+        <div className="summary-card summary-card--narrow">
+          <div className="summary-card__label">Captured turns</div>
+          <div className="summary-card__value">{totalTurns}</div>
+          <div className="summary-card__note">across all agents</div>
+        </div>
+      </div>
+
+      <div className="console-tabs">
+        {AGENT_IDS.map((id) => {
           const count = logs[id]?.length ?? 0
           const isActive = activeTab === id
           return (
             <button
               key={id}
               onClick={() => setActiveTab(id)}
-              style={{
-                background: isActive ? '#1e293b' : 'transparent',
-                border: 'none',
-                borderBottom: isActive ? '2px solid #60a5fa' : '2px solid transparent',
-                color: isActive ? '#e2e8f0' : '#475569',
-                padding: '8px 12px',
-                fontSize: 11,
-                fontFamily: 'monospace',
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                flexShrink: 0,
-              }}
+              className={`console-tab${isActive ? ' console-tab--active' : ''}`}
             >
-              {id}
-              <span style={{ color: '#334155', fontSize: 10, marginLeft: 4 }}>
-                {BEHAVIOR[id]}
-              </span>
-              {count > 0 && (
-                <span style={{
-                  background: '#1e3a8a',
-                  color: '#93c5fd',
-                  borderRadius: 8,
-                  padding: '0 5px',
-                  fontSize: 9,
-                  marginLeft: 5,
-                }}>{count}</span>
-              )}
+              <span className="console-tab__title">{id}</span>
+              <span className="console-tab__meta">{formatBehaviorLabel(BEHAVIOR[id])}</span>
+              {count > 0 && <span className="console-tab__count">{count}</span>}
             </button>
           )
         })}
       </div>
 
-      {/* Console body */}
-      <div style={{
-        flex: 1,
-        overflowY: 'auto',
-        padding: '12px 14px',
-        minHeight: 200,
-        maxHeight: 340,
-      }}>
+      <div className="console-body">
         {turns.length === 0 ? (
-          <span style={{ color: '#334155', fontFamily: 'monospace', fontSize: 11 }}>
-            No turns yet for {activeTab}…
-          </span>
+          <span className="console-empty">No turns recorded yet for {activeTab}.</span>
         ) : (
-          turns.map((t, i) => <TurnCard key={i} turn={t} />)
+          turns.map((turn, index) => <TurnCard key={`${turn.ts}-${index}`} turn={turn} />)
         )}
       </div>
-    </div>
+    </section>
   )
 }

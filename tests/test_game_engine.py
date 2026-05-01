@@ -53,6 +53,9 @@ class GameEngineTests(unittest.TestCase):
         self.assertTrue(any("JAM_SCAN" in row and "impact=3" in row for row in tradeoffs))
         self.assertTrue(any("COVER_TRACKS" in row and "trace=-3" in row for row in tradeoffs))
         self.assertIn("selection_hint", observation)
+        self.assertIn("GHOSTED is a stealth benefit", observation["selection_hint"])
+        self.assertIn("CURFEW is city pressure", observation["selection_hint"])
+        self.assertIn("If SHIVA is below 40 and mode is MINE", observation["selection_hint"])
 
     def test_successful_uncaught_action_lowers_heat(self) -> None:
         state = create_initial_state(citizen_count=1)

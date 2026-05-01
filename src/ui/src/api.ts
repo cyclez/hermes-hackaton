@@ -16,6 +16,27 @@ export interface Citizen {
   statuses: TimedStatus[]
 }
 
+export interface TrainingResult {
+  agent_id: string
+  role: string
+  ok: boolean
+}
+
+export interface TrainingStatus {
+  game_id: string
+  status: 'idle' | 'pending' | 'running' | 'completed' | 'failed'
+  started_at: number | null
+  completed_at: number | null
+  failed_at: number | null
+  completed_count: number
+  total_count: number
+  current_role: string | null
+  current_agent_id: string | null
+  current_behavior: string | null
+  error: string | null
+  results: TrainingResult[]
+}
+
 export interface CityState {
   game_id: string
   season_seconds: number
@@ -28,6 +49,7 @@ export interface CityState {
   game_hour: number
   is_finished: boolean
   winner: string | null
+  training: TrainingStatus
 }
 
 export interface GameEvent {
@@ -51,6 +73,15 @@ export interface MayorDecree {
 export async function fetchState(): Promise<CityState> {
   const r = await fetch('/api/state')
   if (!r.ok) throw new Error(`state ${r.status}`)
+  return r.json()
+}
+
+export async function fetchTrainingStatus(gameId?: string): Promise<TrainingStatus> {
+  const params = new URLSearchParams()
+  if (gameId) params.set('game_id', gameId)
+  const suffix = params.size > 0 ? `?${params}` : ''
+  const r = await fetch(`/api/training-status${suffix}`)
+  if (!r.ok) throw new Error(`training ${r.status}`)
   return r.json()
 }
 

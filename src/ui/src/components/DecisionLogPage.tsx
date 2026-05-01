@@ -1,170 +1,216 @@
-import type { CSSProperties } from 'react'
 import { useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { DecisionLogAttempt, DecisionLogEntry, DecisionLogRun } from '../api'
 import { fetchDecisionLogs, fetchDecisionLogRuns } from '../api'
+import { formatBehaviorLabel, formatClockTime, formatDateTime, formatTokenLabel, hexToRgba, isRecord } from '../ui'
+
+function formatRunOptionLabel(run: DecisionLogRun) {
+  return `${run.game_id.slice(0, 8)}…${run.game_id.slice(-4)} (${run.entry_count})`
+}
 
 function JsonBlock({ value }: { value: unknown }) {
   return (
-    <pre style={{
-      margin: 0,
-      padding: 12,
-      background: '#0f172a',
-      border: '1px solid #1e293b',
-      borderRadius: 6,
-      color: '#cbd5e1',
-      fontSize: 11,
-      overflowX: 'auto',
-      whiteSpace: 'pre-wrap',
-      wordBreak: 'break-word',
-      fontFamily: 'monospace',
-    }}>
-      {JSON.stringify(value, null, 2)}
+    <pre className="json-block">
+      {typeof value === 'string' ? value : JSON.stringify(value, null, 2)}
     </pre>
+  )
+}
+
+function DetailBlock({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="detail-block">
+      <div className="detail-block__label">{label}</div>
+      {children}
+    </div>
   )
 }
 
 function AttemptCard({ attempt }: { attempt: DecisionLogAttempt }) {
   return (
-    <details style={{
-      background: '#111827',
-      border: '1px solid #1f2937',
-      borderRadius: 6,
-      padding: '10px 12px',
-    }}>
-      <summary style={{ cursor: 'pointer', color: '#e2e8f0', fontSize: 12 }}>
-        attempt {attempt.attempt} · {attempt.ok ? 'ok' : 'invalid'}{attempt.repair ? ' · repair' : ''}
-        {attempt.elapsed_seconds !== null ? ` · ${attempt.elapsed_seconds.toFixed(2)}s` : ''}
+    <details className="attempt-card">
+      <summary className="attempt-card__summary">
+        <span>attempt {attempt.attempt}</span>
+        <span>{attempt.ok ? 'ok' : 'invalid'}</span>
+        {attempt.repair && <span>repair</span>}
+        {attempt.elapsed_seconds !== null && <span>{attempt.elapsed_seconds.toFixed(2)}s</span>}
       </summary>
-      <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>
-        <div>
-          <div style={{ color: '#22d3ee', fontSize: 11, marginBottom: 6 }}>Prompt</div>
+      <div className="attempt-card__body">
+        <DetailBlock label="Prompt">
           <JsonBlock value={attempt.prompt} />
-        </div>
-        <div>
-          <div style={{ color: '#a3e635', fontSize: 11, marginBottom: 6 }}>Response</div>
-          <JsonBlock value={attempt.response} />
-        </div>
-        <div>
-          <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: 6 }}>Attempt metadata</div>
-          <JsonBlock value={{
-            validation_error: attempt.validation_error,
-            usage: attempt.usage,
-            api_calls: attempt.api_calls,
-            elapsed_seconds: attempt.elapsed_seconds,
-          }} />
-        </div>
+        </DetailBlock>
+        <DetailBlock label="Response">
+          <JsonBlock value={attempt.response || '(empty)'} />
+        </DetailBlock>
+        <DetailBlock label="Attempt metadata">
+          <JsonBlock
+            value={{
+              validation_error: attempt.validation_error,
+              usage: attempt.usage,
+              api_calls: attempt.api_calls,
+              elapsed_seconds: attempt.elapsed_seconds,
+            }}
+          />
+        </DetailBlock>
       </div>
     </details>
   )
 }
 
-function CitizenStatusRow({ entry }: { entry: DecisionLogEntry }) {
-  const snapshot = (entry.situation?.status_snapshot ?? {}) as Record<string, unknown>
-  const statuses = Array.isArray(snapshot.statuses) ? snapshot.statuses.join(', ') : 'none'
+function StatusMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: string
+}) {
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, color: '#94a3b8', fontSize: 12 }}>
-      <span>mode: <strong style={{ color: '#e2e8f0' }}>{String(snapshot.mode ?? 'n/a')}</strong></span>
-      <span>statuses: <strong style={{ color: '#e2e8f0' }}>{statuses || 'none'}</strong></span>
-      <span>stk: <strong style={{ color: '#e2e8f0' }}>{String(snapshot.stk ?? 'n/a')}</strong></span>
-      <span>shiva: <strong style={{ color: '#e2e8f0' }}>{String(snapshot.shiva ?? 'n/a')}</strong></span>
-      <span>trace: <strong style={{ color: '#e2e8f0' }}>{String(snapshot.trace ?? 'n/a')}</strong></span>
-      <span>cooldown: <strong style={{ color: '#e2e8f0' }}>{String(snapshot.action_cooldown_remaining ?? 'n/a')}</strong></span>
-    </div>
-  )
-}
-
-function MayorStatusRow({ entry }: { entry: DecisionLogEntry }) {
-  const situation = entry.situation as Record<string, unknown>
-  const citizenSnapshots = Array.isArray(situation.citizen_snapshots) ? situation.citizen_snapshots as Array<Record<string, unknown>> : []
-  return (
-    <div style={{ display: 'grid', gap: 8 }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, color: '#94a3b8', fontSize: 12 }}>
-        <span>heat: <strong style={{ color: '#e2e8f0' }}>{String(situation.heat ?? 'n/a')}</strong></span>
-        <span>game hour: <strong style={{ color: '#e2e8f0' }}>{String(situation.game_hour ?? 'n/a')}</strong></span>
-        <span>citizens: <strong style={{ color: '#e2e8f0' }}>{citizenSnapshots.length}</strong></span>
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-        {citizenSnapshots.map((row) => (
-          <span
-            key={String(row.citizen_id)}
-            style={{
-              background: '#1f2937',
-              borderRadius: 999,
-              padding: '4px 8px',
-              color: '#cbd5e1',
-              fontSize: 11,
-              fontFamily: 'monospace',
-            }}
-          >
-            {String(row.citizen_id)} · {String(row.mode)} · stk={String(row.stk)} · shiva={String(row.shiva)} · trace={String(row.trace)}
-          </span>
-        ))}
+    <div className="status-metric">
+      <div className="status-metric__label">{label}</div>
+      <div className="status-metric__value" style={tone ? { color: tone } : undefined}>
+        {value}
       </div>
     </div>
   )
 }
 
 function EntryCard({ entry }: { entry: DecisionLogEntry }) {
+  const situation = isRecord(entry.situation) ? entry.situation : {}
+  const observation = isRecord(situation.observation) ? situation.observation : {}
+  const privateObservation = isRecord(observation.private) ? observation.private : {}
+  const snapshot = isRecord(situation.status_snapshot) ? situation.status_snapshot : privateObservation
+  const citizenSnapshots = Array.isArray(situation.citizen_snapshots)
+    ? situation.citizen_snapshots.filter(isRecord)
+    : []
+  const recentEvidence = Array.isArray(situation.recent_evidence) ? situation.recent_evidence : []
+  const recentActions = Array.isArray(situation.recent_actions) ? situation.recent_actions : []
+  const finalPayload = isRecord(entry.final.payload) ? entry.final.payload : {}
   const finalAction =
     entry.role === 'citizen'
       ? String(entry.final.payload.action ?? entry.final.payload.kind ?? 'unknown')
       : String(entry.final.payload.action ?? 'unknown')
+  const roleColor = entry.role === 'citizen' ? '#58b8ff' : '#ffb457'
+  const actionColor = entry.final.ok ? '#7fd8a8' : '#ff6c67'
+  const rationale = typeof finalPayload.rationale === 'string' ? finalPayload.rationale : entry.summary
+  const repairCount = entry.attempts.filter((attempt) => attempt.repair).length
+  const statuses = Array.isArray(snapshot.statuses) ? snapshot.statuses.map(String) : []
+  const allowedActions = Array.isArray(observation.allowed_actions) ? observation.allowed_actions.length : 0
 
   return (
-    <div style={{
-      background: '#111827',
-      border: '1px solid #1f2937',
-      borderRadius: 8,
-      padding: 16,
-      display: 'grid',
-      gap: 12,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
-        <div>
-          <div style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 700 }}>
-            {entry.agent_id} · {entry.behavior} → {finalAction}
+    <article className="panel decision-entry">
+      <div className="decision-entry__header">
+        <div className="decision-entry__identity">
+          <div className="decision-entry__title">
+            <span
+              className="chip"
+              style={{
+                color: roleColor,
+                background: hexToRgba(roleColor, 0.14),
+                borderColor: hexToRgba(roleColor, 0.34),
+              }}
+            >
+              {entry.role}
+            </span>
+            <strong>{entry.agent_id}</strong>
+            <span className="decision-entry__behavior">{formatBehaviorLabel(entry.behavior)}</span>
+            <span
+              className="chip"
+              style={{
+                color: actionColor,
+                background: hexToRgba(actionColor, 0.12),
+                borderColor: hexToRgba(actionColor, 0.28),
+              }}
+            >
+              {formatTokenLabel(finalAction)}
+            </span>
           </div>
-          <div style={{ color: '#64748b', fontSize: 11 }}>
-            {new Date(entry.ts * 1000).toLocaleString()} · {entry.model}
+          <div className="decision-entry__meta">
+            <span>{formatDateTime(entry.ts)}</span>
+            <span>{entry.model}</span>
+            <span>{entry.attempts.length} attempt{entry.attempts.length === 1 ? '' : 's'}</span>
+            {repairCount > 0 && <span>{repairCount} repair</span>}
           </div>
         </div>
-        <div style={{
-          color: entry.final.ok ? '#86efac' : '#fca5a5',
-          background: entry.final.ok ? '#14532d' : '#450a0a',
-          borderRadius: 999,
-          padding: '4px 10px',
-          fontSize: 11,
-          fontWeight: 700,
-          flexShrink: 0,
-        }}>
+
+        <div
+          className="decision-entry__result"
+          style={{
+            color: entry.final.ok ? '#7fd8a8' : '#ff8f8f',
+            background: entry.final.ok ? 'rgba(38, 102, 69, 0.32)' : 'rgba(122, 37, 37, 0.32)',
+            borderColor: entry.final.ok ? 'rgba(127, 216, 168, 0.28)' : 'rgba(255, 108, 103, 0.28)',
+          }}
+        >
           {entry.final.ok ? 'OK' : 'ERROR'}
         </div>
       </div>
 
-      {entry.role === 'citizen' ? <CitizenStatusRow entry={entry} /> : <MayorStatusRow entry={entry} />}
+      <div className="decision-entry__stats">
+        {entry.role === 'citizen' ? (
+          <>
+            <StatusMetric label="Mode" value={String(snapshot.mode ?? 'n/a')} />
+            <StatusMetric label="STK" value={String(snapshot.stk ?? 'n/a')} />
+            <StatusMetric label="SHIVA" value={String(snapshot.shiva ?? 'n/a')} />
+            <StatusMetric
+              label="Trace"
+              value={String(snapshot.trace ?? 'n/a')}
+              tone={Number(snapshot.trace) >= 40 ? '#ffb457' : undefined}
+            />
+            <StatusMetric label="Cooldown" value={String(snapshot.action_cooldown_remaining ?? '0')} />
+            <StatusMetric label="Allowed actions" value={String(allowedActions)} />
+          </>
+        ) : (
+          <>
+            <StatusMetric label="Heat" value={String(situation.heat ?? 'n/a')} />
+            <StatusMetric label="Game hour" value={String(situation.game_hour ?? 'n/a')} />
+            <StatusMetric label="Citizens" value={String(citizenSnapshots.length)} />
+            <StatusMetric label="Evidence" value={String(recentEvidence.length)} />
+            <StatusMetric label="Recent actions" value={String(recentActions.length)} />
+            <StatusMetric label="Issued at" value={formatClockTime(entry.ts)} />
+          </>
+        )}
+      </div>
 
-      <div style={{ color: '#cbd5e1', fontSize: 12 }}>{entry.summary}</div>
+      {statuses.length > 0 && (
+        <div className="decision-entry__chips">
+          {statuses.map((status) => (
+            <span key={status} className="chip chip--neutral">
+              {status}
+            </span>
+          ))}
+        </div>
+      )}
 
-      <details>
-        <summary style={{ cursor: 'pointer', color: '#93c5fd', fontSize: 12 }}>Situation JSON</summary>
-        <div style={{ marginTop: 10 }}>
+      {entry.role === 'mayor' && citizenSnapshots.length > 0 && (
+        <div className="decision-entry__chips">
+          {citizenSnapshots.slice(0, 6).map((row) => (
+            <span key={String(row.citizen_id)} className="chip chip--neutral">
+              {String(row.citizen_id)} · {String(row.mode)} · trace {String(row.trace)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="decision-entry__summary">
+        <div className="decision-entry__summary-label">Rationale</div>
+        <div>{rationale}</div>
+      </div>
+
+      <div className="decision-entry__details">
+        <DetailBlock label="Situation JSON">
           <JsonBlock value={entry.situation} />
-        </div>
-      </details>
-
-      <details>
-        <summary style={{ cursor: 'pointer', color: '#93c5fd', fontSize: 12 }}>Final payload</summary>
-        <div style={{ marginTop: 10 }}>
+        </DetailBlock>
+        <DetailBlock label="Final payload">
           <JsonBlock value={entry.final.payload} />
-        </div>
-      </details>
+        </DetailBlock>
+      </div>
 
-      <div style={{ display: 'grid', gap: 10 }}>
+      <div className="decision-entry__attempts">
         {entry.attempts.map((attempt) => (
           <AttemptCard key={`${entry.log_id}-${attempt.attempt}`} attempt={attempt} />
         ))}
       </div>
-    </div>
+    </article>
   )
 }
 
@@ -216,11 +262,14 @@ export function DecisionLogPage() {
       }
     }
 
-    poll()
-    const id = setInterval(poll, 3000)
+    void poll()
+    const intervalId = setInterval(() => {
+      void poll()
+    }, 3000)
+
     return () => {
       cancelled = true
-      clearInterval(id)
+      clearInterval(intervalId)
     }
   }, [selectedGameId, roleFilter, agentFilter])
 
@@ -236,114 +285,127 @@ export function DecisionLogPage() {
     return out
   }, [entries])
 
+  const selectedRun = runs.find((run) => run.game_id === selectedGameId)
+
   return (
-    <div style={{
-      minHeight: '100vh',
-      background: '#0f172a',
-      color: '#e2e8f0',
-      fontFamily: 'system-ui, sans-serif',
-      padding: '20px 24px 32px',
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+    <div className="log-page">
+      <div className="panel log-page__header">
         <div>
-          <h1 style={{ margin: 0, fontSize: 22 }}>Decision Logs</h1>
-          <div style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
-            Durable per-run disk logs for citizen and Mayor decisions
-          </div>
+          <div className="panel-kicker">Decision logs</div>
+          <h1 className="log-page__title">Runtime decision inspector</h1>
+          <div className="panel-copy">Durable prompt, response, and validation traces for citizen and Mayor turns.</div>
         </div>
-        <a
-          href="/"
-          style={{
-            color: '#93c5fd',
-            textDecoration: 'none',
-            border: '1px solid #1d4ed8',
-            borderRadius: 6,
-            padding: '8px 12px',
-            fontSize: 12,
-            fontWeight: 600,
-          }}
-        >
-          ← Back to home
-        </a>
+        <a href="/" className="button button--secondary">Back to control room</a>
       </div>
 
-      <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 12,
-        marginBottom: 18,
-        alignItems: 'center',
-      }}>
-        <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>
-          Run
-          <select value={selectedGameId} onChange={(e) => setSelectedGameId(e.target.value)} style={selectStyle}>
-            {runs.map((run) => (
-              <option key={run.game_id} value={run.game_id}>
-                {run.game_id} ({run.entry_count})
-              </option>
-            ))}
-          </select>
-        </label>
+      <div className="log-page__layout">
+        <aside className="log-page__sidebar">
+          <section className="panel app-nav-card">
+            <div>
+              <div className="panel-kicker">Filters</div>
+              <div className="panel-title panel-title--small">Select run and scope</div>
+              <div className="panel-copy">Narrow the live trace without changing the stored backend data.</div>
+            </div>
+          </section>
 
-        <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>
-          Role
-          <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} style={selectStyle}>
-            <option value="">all</option>
-            <option value="citizen">citizen</option>
-            <option value="mayor">mayor</option>
-          </select>
-        </label>
+          <section className="panel citizen-section">
+            <div className="field-grid">
+              <label className="field">
+                <span className="field__label">Run</span>
+                <select value={selectedGameId} onChange={(event) => setSelectedGameId(event.target.value)} className="control">
+                  {runs.length === 0 && <option value="">No runs yet</option>}
+                  {runs.map((run) => (
+                    <option key={run.game_id} value={run.game_id}>
+                      {formatRunOptionLabel(run)}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-        <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>
-          Agent
-          <select value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} style={selectStyle}>
-            <option value="">all</option>
-            {agentOptions.map((agentId) => (
-              <option key={agentId} value={agentId}>{agentId}</option>
-            ))}
-          </select>
-        </label>
-      </div>
+              <label className="field">
+                <span className="field__label">Role</span>
+                <select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)} className="control">
+                  <option value="">all</option>
+                  <option value="citizen">citizen</option>
+                  <option value="mayor">mayor</option>
+                </select>
+              </label>
 
-      {error && (
-        <div style={{
-          marginBottom: 16,
-          background: '#450a0a',
-          border: '1px solid #7f1d1d',
-          color: '#fecaca',
-          borderRadius: 8,
-          padding: 12,
-          fontSize: 12,
-        }}>
-          {error}
-        </div>
-      )}
+              <label className="field">
+                <span className="field__label">Agent</span>
+                <select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)} className="control">
+                  <option value="">all</option>
+                  {agentOptions.map((agentId) => (
+                    <option key={agentId} value={agentId}>{agentId}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </section>
 
-      <div style={{ display: 'grid', gap: 14 }}>
-        {entries.length === 0 ? (
-          <div style={{
-            background: '#111827',
-            border: '1px solid #1f2937',
-            borderRadius: 8,
-            padding: 16,
-            color: '#64748b',
-            fontSize: 13,
-          }}>
-            No decision logs yet for this run.
-          </div>
-        ) : (
-          entries.map((entry) => <EntryCard key={entry.log_id} entry={entry} />)
-        )}
+          <section className="panel citizen-section">
+            <div className="panel-kicker">Run summary</div>
+            <div className="summary-grid">
+              <div className="summary-card">
+                <div className="summary-card__label">Visible entries</div>
+                <div className="summary-card__value">{entries.length}</div>
+                <div className="summary-card__note">filtered results</div>
+              </div>
+              <div className="summary-card">
+                <div className="summary-card__label">Agents</div>
+                <div className="summary-card__value">{agentOptions.length}</div>
+                <div className="summary-card__note">present in current view</div>
+              </div>
+              <div className="summary-card">
+                <div className="summary-card__label">Run count</div>
+                <div className="summary-card__value">{runs.length}</div>
+                <div className="summary-card__note">stored on disk</div>
+              </div>
+              <div className="summary-card">
+                <div className="summary-card__label">Updated</div>
+                <div className="summary-card__value">
+                  {selectedRun?.updated_at ? formatClockTime(selectedRun.updated_at) : 'n/a'}
+                </div>
+                <div className="summary-card__note">page polls every 3s</div>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel citizen-section">
+            <div className="panel-kicker">Current selection</div>
+            <div className="panel-copy">{selectedGameId || 'No run selected'}</div>
+            <div className="decision-entry__chips">
+              <span className="chip chip--neutral">{roleFilter || 'all roles'}</span>
+              <span className="chip chip--neutral">{agentFilter || 'all agents'}</span>
+              <span className="chip chip--neutral">
+                {selectedRun ? `${selectedRun.entry_count} stored entries` : 'awaiting run'}
+              </span>
+            </div>
+            {selectedRun?.updated_at && (
+              <div className="panel-copy panel-copy--tight">Last updated {formatDateTime(selectedRun.updated_at)}</div>
+            )}
+          </section>
+        </aside>
+
+        <section className="log-page__results">
+          {error && (
+            <div className="panel panel--alert">
+              <div className="panel-kicker">Read error</div>
+              <div className="panel-copy">{error}</div>
+            </div>
+          )}
+
+          {entries.length === 0 ? (
+            <div className="panel panel--empty">
+              <div className="panel-kicker">No trace data</div>
+              <div className="panel-title panel-title--small">No decision logs match the current selection.</div>
+              <div className="panel-copy">Switch runs or broaden the filters to inspect stored turns.</div>
+            </div>
+          ) : (
+            entries.map((entry) => <EntryCard key={entry.log_id} entry={entry} />)
+          )}
+        </section>
       </div>
     </div>
   )
-}
-
-const selectStyle: CSSProperties = {
-  background: '#111827',
-  color: '#e2e8f0',
-  border: '1px solid #334155',
-  borderRadius: 6,
-  padding: '8px 10px',
-  minWidth: 220,
 }

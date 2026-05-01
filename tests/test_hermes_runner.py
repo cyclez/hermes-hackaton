@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from src.agents import hermes_runner
 from src.agents.hermes_runner import HermesAgentRunner
+from src.agents.profiles import ensure_citizen_profile
 from src.server.config import Settings
 
 
@@ -72,6 +73,7 @@ class HermesRunnerUsageTests(unittest.TestCase):
 
     def test_gameplay_agent_reads_memory_without_exposing_memory_or_skills_tools(self) -> None:
         calls = []
+        normalized_memory = ""
 
         class FakeAIAgent:
             def __init__(self, **kwargs):
@@ -79,7 +81,19 @@ class HermesRunnerUsageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(hermes_runner, "AIAgent", FakeAIAgent):
             runner = HermesAgentRunner(_settings(), profiles_root=Path(tmp))
+            profile_dir = ensure_citizen_profile("citizen-001", "aggressive", root=Path(tmp))
+            playbook = profile_dir / "skills" / "optimicity-citizen-playbook" / "SKILL.md"
+            playbook.write_text(
+                playbook.read_text(encoding="utf-8") + "\n## Learned Addition\nPrefer DECOY_SIGNAL before SNIFF when SURVEILLED.\n",
+                encoding="utf-8",
+            )
+            memory_path = profile_dir / "memories" / "MEMORY.md"
+            memory_path.write_text(
+                "GHOSTED is highly dangerous and increases risk on its own.\n",
+                encoding="utf-8",
+            )
             runner._get_citizen_agent("citizen-001", "aggressive")
+            normalized_memory = memory_path.read_text(encoding="utf-8")
 
         self.assertEqual(len(calls), 1)
         kwargs = calls[0]
@@ -87,6 +101,10 @@ class HermesRunnerUsageTests(unittest.TestCase):
         self.assertEqual(kwargs["enabled_toolsets"], ["_game_output_only_"])
         self.assertIn("memory", kwargs["disabled_toolsets"])
         self.assertIn("skills", kwargs["disabled_toolsets"])
+        self.assertIn("## Learned Playbook", kwargs["ephemeral_system_prompt"])
+        self.assertIn("## Learned Addition", kwargs["ephemeral_system_prompt"])
+        self.assertNotIn("name: optimicity-citizen-playbook", kwargs["ephemeral_system_prompt"])
+        self.assertIn("GHOSTED follows successful SNIFF and is a stealth-oriented status", normalized_memory)
 
     def test_learning_turn_keeps_profile_home_active_during_conversation(self) -> None:
         seen = {}
@@ -118,7 +136,11 @@ class HermesRunnerUsageTests(unittest.TestCase):
             def shutdown_memory_provider(self, messages=None):
                 seen["shutdown_home"] = os.environ.get("HERMES_HOME")
 
-        with tempfile.TemporaryDirectory() as tmp, patch.object(hermes_runner, "AIAgent", FakeAIAgent):
+        def fake_refresh() -> tuple[object, object]:
+            seen["refresh_home"] = os.environ.get("HERMES_HOME")
+            return object(), object()
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(hermes_runner, "AIAgent", FakeAIAgent), patch.object(hermes_runner, "refresh_hermes_skill_modules", fake_refresh):
             old_home = os.environ.get("HERMES_HOME")
             os.environ["HERMES_HOME"] = "outside-home"
             try:
@@ -137,13 +159,22 @@ class HermesRunnerUsageTests(unittest.TestCase):
 
         expected_home = str((Path(tmp) / "citizen-001").resolve())
         self.assertEqual(seen["init_home"], expected_home)
+        self.assertEqual(seen["refresh_home"], expected_home)
         self.assertEqual(seen["run_home"], expected_home)
         self.assertEqual(seen["shutdown_home"], expected_home)
         self.assertEqual(os.environ.get("HERMES_HOME"), old_home)
         self.assertTrue(result["ok"])
         self.assertEqual(seen["kwargs"]["enabled_toolsets"], ["memory", "skills"])
+        self.assertEqual(seen["kwargs"]["max_iterations"], 4)
         self.assertFalse(seen["kwargs"]["skip_memory"])
         self.assertIn('skill_view(name="optimicity-citizen-playbook")', seen["prompt"])
+        self.assertIn('skill_manage(action="patch"', seen["prompt"])
+        self.assertIn("Only call skills_list() if the named playbook fails to load.", seen["prompt"])
+        self.assertIn("GHOSTED is a stealth benefit granted after a successful SNIFF.", seen["prompt"])
+        self.assertIn(
+            "CURFEW is city pressure, not a citizen status effect. Do not learn or write that CURFEW alone directly changes personal catch probability",
+            seen["prompt"],
+        )
 
 
 if __name__ == "__main__":

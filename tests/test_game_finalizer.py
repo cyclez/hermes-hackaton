@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -112,6 +113,19 @@ class _FakeLearningRunner(_FakeRunner):
     def learn_mayor_from_game(self, behavior: str, evidence: dict, game_id: str) -> dict:
         self.learning_calls.append(("mayor", "mayor", evidence))
         return {"ok": True, "final_response": "mayor learned"}
+
+
+class _BlockingLearningRunner(_FakeLearningRunner):
+    def __init__(self, log_store: DecisionLogStore) -> None:
+        super().__init__(log_store)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def learn_citizen_from_game(self, citizen_id: str, behavior: str, evidence: dict, game_id: str) -> dict:
+        self.learning_calls.append(("citizen", citizen_id, evidence))
+        self.started.set()
+        self.release.wait(timeout=1.0)
+        return {"ok": True, "final_response": "citizen learned"}
 
 
 def _settings() -> Settings:
@@ -299,6 +313,65 @@ class GameFinalizerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("should be stripped", repr(citizen_evidence))
             completed = json.loads((root / "finalized" / state.game_id / "learning-completed.json").read_text(encoding="utf-8"))
             self.assertEqual(len(completed["results"]), 2)
+            status = finalizer.learning_status(state.game_id, state_finished=True)
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["completed_count"], 2)
+            self.assertEqual(status["total_count"], 2)
+            self.assertIsNone(status["current_agent_id"])
+
+    async def test_finalizer_reports_running_learning_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_store = DecisionLogStore(root / "logs")
+            log_store.append("learning-progress", {
+                "log_id": "citizen-log",
+                "game_id": "learning-progress",
+                "ts": 123.0,
+                "role": "citizen",
+                "agent_id": "citizen-001",
+                "behavior": "stealth_first",
+                "situation": {
+                    "observation": {
+                        "global": {"heat": 50.0},
+                        "private": {"trace": 32.0, "stk": 500, "statuses": ["SURVEILLED"]},
+                        "allowed_actions": ["COVER_TRACKS"],
+                        "affordable_actions": ["COVER_TRACKS"],
+                    }
+                },
+                "final": {"payload": {"kind": "ACTION", "action": "COVER_TRACKS", "rationale": "self visible"}},
+            })
+            log_store.append("learning-progress", {
+                "log_id": "mayor-log",
+                "game_id": "learning-progress",
+                "ts": 124.0,
+                "role": "mayor",
+                "agent_id": "mayor",
+                "behavior": "optimizer",
+                "situation": {"heat": 55.0},
+                "final": {"payload": {"action": "SURVEIL", "targets": ["citizen-001"], "rationale": "mayor visible"}},
+            })
+            runner = _BlockingLearningRunner(log_store)
+            finalizer = GameFinalizer(log_store=log_store, runner=runner, root=root / "finalized")
+            state = create_initial_state(citizen_count=1, season_seconds=60)
+            state.game_id = "learning-progress"
+            state.citizens["citizen-001"].behavior = "stealth_first"
+            state.started_at = 0.0
+            state.now = 60.0
+
+            await finalizer.finalize_if_needed(_StubStore(), state.game_id, state)
+            started = await asyncio.to_thread(runner.started.wait, 1.0)
+            self.assertTrue(started)
+
+            status = finalizer.learning_status(state.game_id, state_finished=True)
+            self.assertEqual(status["status"], "running")
+            self.assertEqual(status["current_role"], "citizen_learning")
+            self.assertEqual(status["current_agent_id"], "citizen-001")
+            self.assertEqual(status["current_behavior"], "stealth_first")
+            self.assertEqual(status["completed_count"], 0)
+            self.assertEqual(status["total_count"], 2)
+
+            runner.release.set()
+            await _wait_until(lambda: finalizer.learning_status(state.game_id, state_finished=True)["status"] == "completed")
 
     async def test_restart_before_terminal_does_not_finalize_old_game(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
