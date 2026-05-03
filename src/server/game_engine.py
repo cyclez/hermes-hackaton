@@ -37,7 +37,7 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
         "caught_heat_delta": 1.8,
         "trace_success": 8.0,
         "trace_caught": 18.0,
-        "stk_cost": 1000,
+        "stk_cost": 800,
         "cooldown": 7.0,
     },
     CitizenAction.DECOY_SIGNAL: {
@@ -47,7 +47,7 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
         "trace_success": 4.0,
         "trace_caught": 10.0,
         "stk_cost": 200,
-        "cooldown": 4.0,
+        "cooldown": 35.0,
     },
     CitizenAction.COVER_TRACKS: {
         "base_catch": 0.16,
@@ -60,16 +60,14 @@ ACTION_RULES: dict[CitizenAction, dict[str, float]] = {
     },
 }
 
+SHIVA_CATCH_REDUCTION_PER_POINT = 0.0035
+
 
 MAYOR_ACTION_HEAT: dict[MayorAction, float] = {
     MayorAction.SURVEIL:        1.0,  # watching — low tension
-    MayorAction.TRACE_MARK:     1.0,  # marking for trace — low tension
     MayorAction.JAM:            2.0,  # signal disruption — medium
     MayorAction.CURFEW:         2.0,  # city-wide order — medium
-    MayorAction.AUDIT_PULSE:    2.0,  # system scan — medium
-    MayorAction.SHIVA_THROTTLE: 2.0,  # collective punishment — medium
     MayorAction.STK_DRAIN:      2.0,  # economic attack — medium
-    MayorAction.ACTION_BAN:     2.0,  # restriction decree — medium
     MayorAction.JAIL:           3.0,  # full arrest — high tension
     MayorAction.MOST_WANTED:    3.0,  # public bounty — high tension
 }
@@ -78,31 +76,19 @@ MAYOR_ACTION_HEAT: dict[MayorAction, float] = {
 ACTION_TRADEOFFS: dict[CitizenAction, dict[str, object]] = {
     CitizenAction.SNIFF: {
         "role": "recon",
-        "impact": 2,
-        "risk": 3,
-        "trace_pressure": 3,
-        "best_when": "trace is manageable and reconnaissance pressure is useful",
+        "on_success": "grants GHOSTED",
     },
     CitizenAction.JAM_SCAN: {
         "role": "disrupt",
-        "impact": 3,
-        "risk": 4,
-        "trace_pressure": 4,
-        "best_when": "server catch pressure is high enough to justify a risky disruption",
+        "on_success": "reduces server scan pressure for everyone",
     },
     CitizenAction.DECOY_SIGNAL: {
         "role": "setup",
-        "impact": 1,
-        "risk": 2,
-        "trace_pressure": 2,
-        "best_when": "preparing a safer future action or avoiding predictable patterns",
+        "on_success": "clears SURVEILLED and grants a short PROTECTED anti-SURVEIL window",
     },
     CitizenAction.COVER_TRACKS: {
         "role": "recover",
-        "impact": 0,
-        "risk": 1,
-        "trace_pressure": -3,
-        "best_when": "trace is high, especially above 45, and continued action would invite punishment",
+        "on_success": "reduces your trace directly",
     },
 }
 
@@ -160,10 +146,13 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
     action_tradeoffs = [
         f"{action.value}: role={ACTION_TRADEOFFS[action]['role']}, "
         f"stk_cost={ACTION_RULES[action]['stk_cost']:.0f}, "
-        f"impact={ACTION_TRADEOFFS[action]['impact']}, "
-        f"risk={ACTION_TRADEOFFS[action]['risk']}, "
-        f"trace={ACTION_TRADEOFFS[action]['trace_pressure']}, "
-        f"use={ACTION_TRADEOFFS[action]['best_when']}"
+        f"cooldown={ACTION_RULES[action]['cooldown']:.0f}, "
+        f"base_catch={ACTION_RULES[action]['base_catch']:.2f}, "
+        f"success_heat_delta={ACTION_RULES[action]['success_heat_delta']:.1f}, "
+        f"caught_heat_delta={ACTION_RULES[action]['caught_heat_delta']:.1f}, "
+        f"trace_success={ACTION_RULES[action]['trace_success']:.1f}, "
+        f"trace_caught={ACTION_RULES[action]['trace_caught']:.1f}, "
+        f"on_success={ACTION_TRADEOFFS[action]['on_success']}"
         for action in CitizenAction
     ]
     jailed = citizen.has_status(StatusEffect.JAILED, state.now)
@@ -176,7 +165,7 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
     if jailed:
         hint = "JAILED: all actions and mode changes are blocked. You must HOLD until released. Pre-jail mode restores automatically."
     elif jammed:
-        hint = "JAMMED: active actions are blocked. You may change mode (e.g. switch to MINE to earn STK) or HOLD."
+        hint = "JAMMED: all active control is blocked right now. You must HOLD until the jam expires."
     elif sleeping:
         hint = "SLEEPING: active actions are blocked while in SLEEP mode. Switch to MINE or SYNC to act, or HOLD to keep recovering trace."
     elif on_cooldown:
@@ -185,16 +174,13 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
         )
     else:
         hint = (
-            "STK is your action currency (costs: COVER_TRACKS=100, DECOY_SIGNAL=200, SNIFF=500, JAM_SCAN=1000). "
-            "MINE refills STK fast (+12/s) but is the exposed posture. SYNC builds SHIVA and lowers catch exposure. "
-            "Trace raises catch risk continuously. SHIVA lowers it continuously. "
-            "SURVEILLED is a direct danger signal. GHOSTED is a stealth benefit after successful SNIFF, not a penalty. "
-            "Only pick from affordable_actions. "
-            "At low trace, do not assume risky actions are safe if SHIVA is still low or you are still in MINE. "
-            "If SHIVA is below 40 and mode is MINE, prefer DECOY_SIGNAL or SYNC unless the upside clearly justifies risk. "
-            "At high trace, reduce exposure. "
-            "COVER_TRACKS is recovery, not the default aggressive move. "
-            "Switch to MINE if STK is low; switch to SYNC to build SHIVA and reduce trace. "
+            "Factual observation only: choose from allowed_actions, affordable_actions, and allowed_modes. "
+            "STK is the action currency. MINE is the exposed posture. SYNC builds SHIVA and lowers trace. "
+            "Trace raises catch risk continuously. SHIVA lowers catch risk continuously. "
+            "SURVEILLED raises catch risk. MOST_WANTED is stronger targeting pressure than SURVEILLED. "
+            "MOST_WANTED also adds passive trace pressure over time. "
+            "GHOSTED is a stealth benefit after successful SNIFF. "
+            "PROTECTED from successful DECOY_SIGNAL clears SURVEILLED and blocks fresh SURVEIL for a short window. "
             "CURFEW is city pressure, not a personal action block or direct catch modifier."
         )
 
@@ -218,7 +204,52 @@ def build_citizen_observation(state: CityState, citizen_id: str) -> dict[str, ob
         "affordable_actions": [] if actions_blocked else [action.value for action in CitizenAction if citizen.stk >= ACTION_RULES[action]["stk_cost"]],
         "action_tradeoffs": action_tradeoffs,
         "selection_hint": hint,
-        "allowed_modes": [] if jailed else [mode.value for mode in CitizenMode],
+        "allowed_modes": [] if (jailed or jammed) else [mode.value for mode in CitizenMode],
+    }
+
+
+def build_mayor_context(state: CityState, dossiers: list[Dossier], recent_events: list[GameEvent]) -> dict[str, object]:
+    return {
+        "kind": "mayor_context",
+        "heat": round(state.heat, 2),
+        "game_hour": round(state.game_hour, 2),
+        "recent_actions": [
+            {
+                "citizen_id": event.payload.get("citizen_id"),
+                "public_label": event.payload.get("public_label"),
+                "action": event.payload.get("action"),
+                "caught": event.payload.get("caught"),
+                "heat_after": event.payload.get("heat"),
+            }
+            for event in recent_events
+            if event.kind == "citizen_action"
+        ],
+        "recent_evidence": [
+            {
+                "citizen_id": target.citizen_id,
+                "action": target.action.value,
+                "p_catch": round(target.p_catch, 3),
+                "trace": round(target.trace, 2),
+                "shiva": round(target.shiva, 2),
+            }
+            for dossier in dossiers
+            for target in dossier.targets
+        ],
+        "active_citizens": list(state.citizens.keys()),
+        "citizen_snapshots": [
+            {
+                "citizen_id": citizen.citizen_id,
+                "behavior": citizen.behavior,
+                "mode": citizen.mode.value,
+                "queued_mode": citizen.queued_mode.value if citizen.queued_mode else None,
+                "statuses": [status.effect.value for status in citizen.active_statuses(state.now)],
+                "stk": int(citizen.stk),
+                "shiva": round(citizen.shiva, 2),
+                "trace": round(citizen.trace, 2),
+                "action_cooldown_remaining": round(max(0.0, citizen.action_cooldown_until - state.now), 2),
+            }
+            for citizen in state.citizens.values()
+        ],
     }
 
 
@@ -243,21 +274,10 @@ def apply_citizen_decision(
 
 def apply_mayor_decree(state: CityState, decree: MayorDecree, *, tick: int = 0) -> list[GameEvent]:
     events: list[GameEvent] = []
-    for target_id in decree.targets:
-        citizen = state.citizens.get(target_id)
-        if citizen is None:
-            continue
-        duration = max(1, decree.duration_seconds)
-        if decree.action == MayorAction.JAIL:
-            citizen.queued_mode = citizen.mode  # save pre-jail mode for restoration
-            _add_status(citizen, StatusEffect.JAILED, state.now + duration)
-        elif decree.action == MayorAction.JAM:
-            _add_status(citizen, StatusEffect.JAMMED, state.now + duration)
-        elif decree.action in {MayorAction.SURVEIL, MayorAction.TRACE_MARK, MayorAction.MOST_WANTED}:
-            _add_status(citizen, StatusEffect.SURVEILLED, state.now + duration)
-        elif decree.action == MayorAction.STK_DRAIN:
-            citizen.stk = max(0.0, citizen.stk - 500.0)
-        heat_delta = MAYOR_ACTION_HEAT.get(decree.action, 1.0)
+    duration = max(1, decree.duration_seconds)
+    heat_delta = MAYOR_ACTION_HEAT.get(decree.action, 1.0)
+
+    if decree.action == MayorAction.CURFEW:
         state.heat = _clamp(state.heat + heat_delta, 0.0, 100.0)
         events.append(
             GameEvent(
@@ -265,14 +285,54 @@ def apply_mayor_decree(state: CityState, decree: MayorDecree, *, tick: int = 0) 
                 tick=tick,
                 game_hour=state.game_hour,
                 kind="mayor_decree",
-                message=f"Mayor applied {decree.action.value} to {target_id}.",
-                payload={"target": target_id, "action": decree.action.value, "rationale": decree.rationale, "heat_delta": heat_delta},
+                message="Mayor applied CURFEW citywide.",
+                payload={
+                    "action": decree.action.value,
+                    "rationale": decree.rationale,
+                    "heat_delta": heat_delta,
+                    "scope": "citywide",
+                    "applied": True,
+                    "blocked_reason": None,
+                },
                 public=True,
             )
         )
-    if decree.action == MayorAction.SHIVA_THROTTLE:
-        for citizen in state.citizens.values():
-            citizen.shiva = max(0.0, citizen.shiva - 5.0)
+        return events
+
+    outcomes: list[tuple[str, bool, str | None]] = []
+    for target_id in decree.targets:
+        citizen = state.citizens.get(target_id)
+        if citizen is None:
+            continue
+        applied, blocked_reason = _apply_mayor_effect(state, citizen, decree.action, duration)
+        outcomes.append((target_id, applied, blocked_reason))
+    affected_any = any(applied for _, applied, _ in outcomes)
+    if affected_any:
+        state.heat = _clamp(state.heat + heat_delta, 0.0, 100.0)
+    applied_heat_delta = heat_delta if affected_any else 0.0
+    for target_id, applied, blocked_reason in outcomes:
+        events.append(
+            GameEvent(
+                event_id=str(uuid.uuid4()),
+                tick=tick,
+                game_hour=state.game_hour,
+                kind="mayor_decree",
+                message=(
+                    f"Mayor applied {decree.action.value} to {target_id}."
+                    if applied
+                    else f"Mayor attempted {decree.action.value} on {target_id}, but it was blocked."
+                ),
+                payload={
+                    "target": target_id,
+                    "action": decree.action.value,
+                    "rationale": decree.rationale,
+                    "heat_delta": applied_heat_delta,
+                    "applied": applied,
+                    "blocked_reason": blocked_reason,
+                },
+                public=True,
+            )
+        )
     return events
 
 
@@ -282,6 +342,8 @@ def _apply_mode_change(state: CityState, citizen: Citizen, decision: CitizenDeci
         return _invalid_decision(state, citizen, "Mode change did not include target mode.", tick)
     if citizen.has_status(StatusEffect.JAILED, state.now):
         return _invalid_decision(state, citizen, "Jailed: no mode changes. Pre-jail mode restores on release.", tick)
+    if citizen.has_status(StatusEffect.JAMMED, state.now):
+        return _invalid_decision(state, citizen, "Jammed: no mode changes until the jam expires.", tick)
     citizen.mode = decision.mode
     citizen.queued_mode = None
     result.events.append(
@@ -362,6 +424,9 @@ def _apply_action(
         citizen.trace += rule["trace_success"]
         if action == CitizenAction.SNIFF:
             _add_status(citizen, StatusEffect.GHOSTED, state.now + 15.0)
+        if action == CitizenAction.DECOY_SIGNAL:
+            _remove_status(citizen, StatusEffect.SURVEILLED)
+            _add_status(citizen, StatusEffect.PROTECTED, state.now + 30.0)
         if action == CitizenAction.JAM_SCAN:
             state.server_scan_jammed_until = max(state.server_scan_jammed_until, state.now + 10.0)
 
@@ -400,13 +465,75 @@ def catch_probability(state: CityState, citizen: Citizen, action: CitizenAction)
         p_catch -= 0.25
     if citizen.has_status(StatusEffect.SURVEILLED, state.now):
         p_catch += 0.22
+    if citizen.has_status(StatusEffect.MOST_WANTED, state.now):
+        p_catch += 0.32
     if citizen.has_status(StatusEffect.GHOSTED, state.now):
         p_catch -= 0.16
     if state.server_scan_jammed_until > state.now:
         p_catch -= 0.15
     p_catch += citizen.trace * 0.003
-    p_catch -= citizen.shiva * 0.004
+    p_catch -= citizen.shiva * SHIVA_CATCH_REDUCTION_PER_POINT
     return _clamp(p_catch, 0.05, 0.95)
+
+
+def _apply_mayor_effect(
+    state: CityState,
+    citizen: Citizen,
+    action: MayorAction,
+    duration: int,
+) -> tuple[bool, str | None]:
+    if action == MayorAction.JAIL:
+        if citizen.has_status(StatusEffect.JAILED, state.now):
+            return False, "already_jailed"
+        citizen.queued_mode = citizen.mode
+        _remove_status(citizen, StatusEffect.JAMMED)
+        _remove_status(citizen, StatusEffect.SURVEILLED)
+        _remove_status(citizen, StatusEffect.MOST_WANTED)
+        _remove_status(citizen, StatusEffect.GHOSTED)
+        _remove_status(citizen, StatusEffect.PROTECTED)
+        _add_status(citizen, StatusEffect.JAILED, state.now + duration)
+        return True, None
+
+    if action == MayorAction.JAM:
+        if citizen.has_status(StatusEffect.JAILED, state.now):
+            return False, "target_jailed"
+        if citizen.has_status(StatusEffect.JAMMED, state.now):
+            return False, "already_jammed"
+        _remove_status(citizen, StatusEffect.SURVEILLED)
+        _add_status(citizen, StatusEffect.JAMMED, state.now + duration)
+        return True, None
+
+    if action == MayorAction.SURVEIL:
+        if citizen.has_status(StatusEffect.JAILED, state.now):
+            return False, "target_jailed"
+        if citizen.has_status(StatusEffect.JAMMED, state.now):
+            return False, "target_jammed"
+        if citizen.has_status(StatusEffect.PROTECTED, state.now):
+            return False, "target_protected"
+        if citizen.has_status(StatusEffect.SURVEILLED, state.now):
+            return False, "already_surveilled"
+        if citizen.has_status(StatusEffect.MOST_WANTED, state.now):
+            return False, "already_most_wanted"
+        _add_status(citizen, StatusEffect.SURVEILLED, state.now + duration)
+        return True, None
+
+    if action == MayorAction.MOST_WANTED:
+        if citizen.has_status(StatusEffect.JAILED, state.now):
+            return False, "target_jailed"
+        if citizen.has_status(StatusEffect.MOST_WANTED, state.now):
+            return False, "already_most_wanted"
+        _remove_status(citizen, StatusEffect.SURVEILLED)
+        _add_status(citizen, StatusEffect.MOST_WANTED, state.now + duration)
+        return True, None
+
+    if action == MayorAction.STK_DRAIN:
+        if citizen.stk <= 0.0:
+            return False, "no_stk_to_drain"
+        citizen.stk = max(0.0, citizen.stk - 500.0)
+        citizen.trace = _clamp(citizen.trace + 8.0, 0.0, 100.0)
+        return True, None
+
+    return False, "unsupported_action"
 
 
 def _invalid_decision(state: CityState, citizen: Citizen, reason: str, tick: int) -> EngineResult:
@@ -444,6 +571,9 @@ def _apply_passive_mode_effects(state: CityState, seconds: float) -> None:
             citizen.trace -= 0.09 * seconds
             citizen.shiva -= 0.025 * seconds
 
+        if citizen.has_status(StatusEffect.MOST_WANTED, state.now):
+            citizen.trace += 0.12 * seconds
+
         citizen.stk = _clamp(citizen.stk, 0.0, 9999.0)
         citizen.shiva = _clamp(citizen.shiva, 0.0, 100.0)
         citizen.trace = _clamp(citizen.trace, 0.0, 100.0)
@@ -468,6 +598,10 @@ def _expire_statuses_and_resolve_modes(state: CityState) -> None:
 def _add_status(citizen: Citizen, effect: StatusEffect, expires_at: float) -> None:
     citizen.statuses = [status for status in citizen.statuses if status.effect != effect]
     citizen.statuses.append(TimedStatus(effect=effect, expires_at=expires_at))
+
+
+def _remove_status(citizen: Citizen, effect: StatusEffect) -> None:
+    citizen.statuses = [status for status in citizen.statuses if status.effect != effect]
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:

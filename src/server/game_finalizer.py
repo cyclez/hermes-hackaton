@@ -29,6 +29,7 @@ class GameFinalizer:
         *,
         log_store: DecisionLogStore,
         runner: HermesAgentRunner | None = None,
+        training_enabled: bool = True,
         root: Path | None = None,
         recent_event_limit: int = 25,
         recent_dossier_limit: int = 10,
@@ -37,6 +38,7 @@ class GameFinalizer:
     ) -> None:
         self.log_store = log_store
         self.runner = runner
+        self.training_enabled = training_enabled
         self.root = root or (Path(".runtime") / "finalized-games")
         self.root.mkdir(parents=True, exist_ok=True)
         self.recent_event_limit = recent_event_limit
@@ -104,19 +106,20 @@ class GameFinalizer:
             }
 
         if failed is not None:
+            failed_results = list(failed.get("results") or [])
             return {
                 "game_id": game_id,
                 "status": "failed",
                 "started_at": started.get("learning_started_at") if started else None,
                 "completed_at": None,
                 "failed_at": failed.get("failed_at"),
-                "completed_count": int((started or {}).get("completed_count") or 0),
-                "total_count": int((started or {}).get("total_count") or 0),
+                "completed_count": int(failed.get("completed_count") or (started or {}).get("completed_count") or 0),
+                "total_count": int(failed.get("total_count") or (started or {}).get("total_count") or 0),
                 "current_role": None,
                 "current_agent_id": None,
                 "current_behavior": None,
                 "error": str(failed.get("error") or "learning pass failed"),
-                "results": [],
+                "results": failed_results,
             }
 
         if started is not None:
@@ -128,6 +131,22 @@ class GameFinalizer:
                 "failed_at": None,
                 "completed_count": int(started.get("completed_count") or 0),
                 "total_count": int(started.get("total_count") or 0),
+                "current_role": None,
+                "current_agent_id": None,
+                "current_behavior": None,
+                "error": None,
+                "results": [],
+            }
+
+        if not self.training_enabled and state_finished:
+            return {
+                "game_id": game_id,
+                "status": "disabled",
+                "started_at": None,
+                "completed_at": None,
+                "failed_at": None,
+                "completed_count": 0,
+                "total_count": 0,
                 "current_role": None,
                 "current_agent_id": None,
                 "current_behavior": None,
@@ -194,7 +213,7 @@ class GameFinalizer:
         return self._game_dir(game_id) / "learning-failed.json"
 
     def _schedule_learning_if_configured(self, store: FinalizerStore, game_id: str, packet: dict[str, Any]) -> None:
-        if self.runner is None:
+        if self.runner is None or not self.training_enabled:
             return
         if packet.get("reason") not in {"heat_maxed", "heat_depleted", "timeout_survived"}:
             return
@@ -289,11 +308,12 @@ class GameFinalizer:
                         cid, beh, ev, game_id
                     ),
                 )
+                row = _learning_result_row(citizen_id, "citizen_learning", result)
                 print(
-                    f"[finalizer] learned citizen {citizen_id} ok={bool(result.get('ok'))} game={game_id}",
+                    f"[finalizer] learned citizen {citizen_id} decision={row['decision']} ok={row['ok']} game={game_id}",
                     flush=True,
                 )
-                results.append({"agent_id": citizen_id, "role": "citizen_learning", "ok": bool(result.get("ok"))})
+                results.append(row)
                 self._set_learning_progress(
                     game_id,
                     completed_count=len(results),
@@ -317,11 +337,12 @@ class GameFinalizer:
                 None,
                 lambda ev=mayor_evidence, beh=mayor_behavior: self.runner.learn_mayor_from_game(beh, ev, game_id),
             )
+            mayor_row = _learning_result_row("mayor", "mayor_learning", mayor_result)
             print(
-                f"[finalizer] learned mayor ok={bool(mayor_result.get('ok'))} game={game_id}",
+                f"[finalizer] learned mayor decision={mayor_row['decision']} ok={mayor_row['ok']} game={game_id}",
                 flush=True,
             )
-            results.append({"agent_id": "mayor", "role": "mayor_learning", "ok": bool(mayor_result.get("ok"))})
+            results.append(mayor_row)
             completed_at = time.time()
             self._write_json_atomic(self._learning_completed_path(game_id), {
                 "game_id": game_id,
@@ -348,16 +369,22 @@ class GameFinalizer:
                 "game_id": game_id,
                 "failed_at": failed_at,
                 "error": str(exc),
+                "results": results,
+                "completed_count": len(results),
+                "total_count": total_count,
             })
             self._set_learning_progress(
                 game_id,
                 status="failed",
                 completed_at=None,
                 failed_at=failed_at,
+                completed_count=len(results),
+                total_count=total_count,
                 current_role=None,
                 current_agent_id=None,
                 current_behavior=None,
                 error=str(exc),
+                results=list(results),
             )
             print(f"[finalizer] learning failed for game {game_id}: {exc}", flush=True)
 
@@ -402,4 +429,18 @@ def _citizen_snapshot(citizen: Citizen, now: float) -> dict[str, object]:
         "shiva": round(citizen.shiva, 2),
         "trace": round(citizen.trace, 2),
         "action_cooldown_remaining": round(max(0.0, citizen.action_cooldown_until - now), 2),
+    }
+
+
+def _learning_result_row(agent_id: str, role: str, result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "agent_id": agent_id,
+        "role": role,
+        "ok": bool(result.get("ok")),
+        "completed": bool(result.get("completed")),
+        "partial": bool(result.get("partial")),
+        "error": result.get("error"),
+        "decision": result.get("decision") or ("failed" if not result.get("ok") else "no_change"),
+        "skill_changed": bool((result.get("skill_update") or {}).get("changed")),
+        "memory_changed": bool((result.get("memory_update") or {}).get("changed")),
     }

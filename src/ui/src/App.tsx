@@ -159,7 +159,7 @@ function HomePage() {
           <MayorPanel decree={decree} />
         </aside>
 
-        <AgentConsoles logs={agentLogs} />
+        <AgentConsoles state={state} logs={agentLogs} />
       </main>
     </div>
   )

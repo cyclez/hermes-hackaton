@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.agents.hermes_runner import HermesAgentRunner
 from src.server.config import Settings
@@ -17,6 +17,7 @@ from src.server.game_learning_evidence import build_citizen_learning_evidence, b
 FINALIZED_ROOT = Path(".runtime") / "finalized-games"
 LEARNING_EVENT_LIMIT = 2000
 LEARNING_DOSSIER_LIMIT = 2000
+_LEGACY_LEARNING_MAX_ITERATIONS = 4
 
 
 @dataclass(frozen=True)
@@ -30,9 +31,9 @@ def completed_learning_agents(decision_logs: list[dict[str, Any]]) -> set[str]:
     completed: set[str] = set()
     for entry in decision_logs:
         role = entry.get("role")
-        if role == "citizen_learning" and entry.get("agent_id"):
+        if role == "citizen_learning" and entry.get("agent_id") and _learning_entry_completed(entry):
             completed.add(str(entry["agent_id"]))
-        elif role == "mayor_learning":
+        elif role == "mayor_learning" and _learning_entry_completed(entry):
             completed.add("mayor")
     return completed
 
@@ -80,6 +81,7 @@ async def resume_learning_for_game(
     finalized_root: Path = FINALIZED_ROOT,
     decision_log_store: DecisionLogStore | None = None,
     runner: HermesAgentRunner | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     settings = settings or Settings.load()
     if settings.llm_provider.lower() != "ollama" and settings.openrouter_api_key:
@@ -95,6 +97,16 @@ async def resume_learning_for_game(
         skip=skip,
         include_existing=include_existing,
     )
+    if progress_callback is not None:
+        progress_callback({
+            "phase": "planned",
+            "game_id": game_id,
+            "total_agents": len(agents),
+            "agents": [
+                {"role": agent.role, "agent_id": agent.agent_id, "behavior": agent.behavior}
+                for agent in agents
+            ],
+        })
 
     from src.server.postgres_store import PostgresStore
 
@@ -107,21 +119,48 @@ async def resume_learning_for_game(
         await store.close()
 
     results: list[dict[str, Any]] = []
-    completed_ok = False
     try:
-        for agent in agents:
+        for index, agent in enumerate(agents, start=1):
+            if progress_callback is not None:
+                progress_callback({
+                    "phase": "start",
+                    "game_id": game_id,
+                    "index": index,
+                    "total_agents": len(agents),
+                    "role": agent.role,
+                    "agent_id": agent.agent_id,
+                    "behavior": agent.behavior,
+                })
             if agent.role == "citizen":
                 evidence = build_citizen_learning_evidence(agent.agent_id, packet, decision_logs, events)
                 result = runner.learn_citizen_from_game(agent.agent_id, agent.behavior, evidence, game_id)
             else:
                 evidence = build_mayor_learning_evidence(packet, decision_logs, events, dossiers)
                 result = runner.learn_mayor_from_game(agent.behavior, evidence, game_id)
-            results.append({
+            row = {
                 "agent_id": agent.agent_id,
                 "role": f"{agent.role}_learning",
                 "ok": bool(result.get("ok")),
-            })
+                "completed": bool(result.get("completed")),
+                "partial": bool(result.get("partial")),
+                "error": result.get("error"),
+                "decision": result.get("decision") or ("failed" if not result.get("ok") else "no_change"),
+                "skill_changed": bool((result.get("skill_update") or {}).get("changed")),
+                "memory_changed": bool((result.get("memory_update") or {}).get("changed")),
+            }
+            results.append(row)
             decision_logs = log_store.read_entries(game_id, limit=0)
+            if progress_callback is not None:
+                progress_callback({
+                    "phase": "done",
+                    "game_id": game_id,
+                    "index": index,
+                    "total_agents": len(agents),
+                    "role": agent.role,
+                    "agent_id": agent.agent_id,
+                    "behavior": agent.behavior,
+                    "row": dict(row),
+                })
 
         payload = {
             "game_id": game_id,
@@ -132,7 +171,12 @@ async def resume_learning_for_game(
             "results": results,
         }
         _write_json_atomic(_completed_path(finalized_root, game_id), payload)
-        completed_ok = True
+        if progress_callback is not None:
+            progress_callback({
+                "phase": "completed",
+                "game_id": game_id,
+                "results": list(results),
+            })
         return payload
     except Exception as exc:
         payload = {
@@ -141,11 +185,22 @@ async def resume_learning_for_game(
             "resumed": True,
             "error": str(exc),
             "results": results,
+            "completed_count": len(results),
+            "total_count": len(agents),
         }
         _write_json_atomic(_failed_path(finalized_root, game_id), payload)
+        if progress_callback is not None:
+            progress_callback({
+                "phase": "failed",
+                "game_id": game_id,
+                "error": str(exc),
+                "results": list(results),
+                "completed_count": len(results),
+                "total_count": len(agents),
+            })
         raise
     finally:
-        if not completed_ok and not results:
+        if not results:
             # Keep a marker for failures that occur before the first agent call.
             failed_path = _failed_path(finalized_root, game_id)
             if not failed_path.exists():
@@ -154,8 +209,37 @@ async def resume_learning_for_game(
                     "failed_at": time.time(),
                     "resumed": True,
                     "error": "resume did not complete",
-                    "results": results,
+                    "completed_count": 0,
+                    "total_count": len(agents),
+                    "results": [],
                 })
+
+
+def _learning_entry_completed(entry: dict[str, Any]) -> bool:
+    final = entry.get("final") or {}
+    if final.get("ok") is not True:
+        return False
+
+    payload = final.get("payload") or {}
+    if payload:
+        if payload.get("completed") is False:
+            return False
+        if payload.get("partial") is True:
+            return False
+        if payload.get("error"):
+            return False
+
+    # Legacy heuristic: older learning rows incorrectly persisted ok=True even
+    # after exhausting the fixed 4-call learning budget.
+    attempts = entry.get("attempts") or []
+    first_attempt = attempts[0] if attempts else {}
+    api_calls = first_attempt.get("api_calls")
+    if isinstance(api_calls, (int, float)) and api_calls >= _LEGACY_LEARNING_MAX_ITERATIONS:
+        return False
+
+    return True
+
+
 
 
 def _read_terminal_packet(root: Path, game_id: str) -> dict[str, Any]:

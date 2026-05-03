@@ -1,19 +1,15 @@
-import { useState } from 'react'
-import type { AgentTurn } from '../api'
+import { useMemo, useState } from 'react'
+import type { AgentTurn, CityState } from '../api'
 import { formatBehaviorLabel } from '../ui'
 
 interface Props {
+  state: CityState
   logs: Record<string, AgentTurn[]>
 }
 
-const AGENT_IDS = ['citizen-001', 'citizen-002', 'citizen-003', 'citizen-004', 'citizen-005', 'mayor']
-const BEHAVIOR: Record<string, string> = {
-  'citizen-001': 'aggressive',
-  'citizen-002': 'cautious',
-  'citizen-003': 'opportunistic',
-  'citizen-004': 'stealth_first',
-  'citizen-005': 'resource_maximizer',
-  mayor: 'optimizer',
+interface AgentConsoleSpec {
+  agentId: string
+  behavior: string
 }
 
 function TurnCard({ turn }: { turn: AgentTurn }) {
@@ -74,10 +70,37 @@ function TurnCard({ turn }: { turn: AgentTurn }) {
   )
 }
 
-export function AgentConsoles({ logs }: Props) {
-  const [activeTab, setActiveTab] = useState('citizen-001')
-  const turns = [...(logs[activeTab] ?? [])].reverse()
+function compareAgentIds(left: string, right: string) {
+  if (left === 'mayor') return 1
+  if (right === 'mayor') return -1
+
+  const leftMatch = left.match(/^citizen-(\d+)$/)
+  const rightMatch = right.match(/^citizen-(\d+)$/)
+  if (leftMatch && rightMatch) return Number(leftMatch[1]) - Number(rightMatch[1])
+  return left.localeCompare(right)
+}
+
+function buildAgentSpecs(state: CityState): AgentConsoleSpec[] {
+  const ordered = Object.values(state.citizens)
+    .sort((left, right) => compareAgentIds(left.citizen_id, right.citizen_id))
+    .map((citizen) => ({
+      agentId: citizen.citizen_id,
+      behavior: citizen.behavior,
+    }))
+
+  ordered.push({ agentId: 'mayor', behavior: 'optimizer' })
+  return ordered
+}
+
+export function AgentConsoles({ state, logs }: Props) {
+  const agentSpecs = useMemo(() => buildAgentSpecs(state), [state])
+  const [activeAgent, setActiveAgent] = useState('citizen-001')
   const totalTurns = Object.values(logs).reduce((sum, items) => sum + items.length, 0)
+  const currentAgentId = agentSpecs.some((spec) => spec.agentId === activeAgent)
+    ? activeAgent
+    : (agentSpecs[0]?.agentId ?? '')
+  const activeSpec = agentSpecs.find((spec) => spec.agentId === currentAgentId) ?? agentSpecs[0] ?? null
+  const turns = [...(logs[activeSpec?.agentId ?? ''] ?? [])].reverse()
 
   return (
     <section className="panel consoles-panel">
@@ -89,34 +112,53 @@ export function AgentConsoles({ logs }: Props) {
         <div className="summary-card summary-card--narrow">
           <div className="summary-card__label">Captured turns</div>
           <div className="summary-card__value">{totalTurns}</div>
-          <div className="summary-card__note">across all agents</div>
+          <div className="summary-card__note">{agentSpecs.length} tracked agents</div>
         </div>
       </div>
 
-      <div className="console-tabs">
-        {AGENT_IDS.map((id) => {
-          const count = logs[id]?.length ?? 0
-          const isActive = activeTab === id
+      <div className="console-tabs" role="tablist" aria-label="Agent consoles">
+        {agentSpecs.map((spec) => {
+          const count = logs[spec.agentId]?.length ?? 0
+          const isActive = currentAgentId === spec.agentId
+
           return (
             <button
-              key={id}
-              onClick={() => setActiveTab(id)}
+              key={spec.agentId}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => setActiveAgent(spec.agentId)}
               className={`console-tab${isActive ? ' console-tab--active' : ''}`}
             >
-              <span className="console-tab__title">{id}</span>
-              <span className="console-tab__meta">{formatBehaviorLabel(BEHAVIOR[id])}</span>
+              <span className="console-tab__title">{spec.agentId}</span>
+              <span className="console-tab__meta">{formatBehaviorLabel(spec.behavior)}</span>
               {count > 0 && <span className="console-tab__count">{count}</span>}
             </button>
           )
         })}
       </div>
 
-      <div className="console-body">
-        {turns.length === 0 ? (
-          <span className="console-empty">No turns recorded yet for {activeTab}.</span>
-        ) : (
-          turns.map((turn, index) => <TurnCard key={`${turn.ts}-${index}`} turn={turn} />)
-        )}
+      <div className="console-focus">
+        <div className="console-focus__header">
+          {activeSpec && (
+            <div className="console-focus__identity">
+              <div className="console-focus__title">{activeSpec.agentId}</div>
+              <div className="console-focus__meta">{formatBehaviorLabel(activeSpec.behavior)}</div>
+            </div>
+          )}
+
+          <div className="console-focus__count">{turns.length} turns</div>
+        </div>
+
+        <div className="console-body">
+          {turns.length === 0 ? (
+            <span className="console-empty">
+              No turns recorded yet for {activeSpec?.agentId ?? 'this agent'}.
+            </span>
+          ) : (
+            turns.map((turn, index) => <TurnCard key={`${turn.ts}-${index}`} turn={turn} />)
+          )}
+        </div>
       </div>
     </section>
   )

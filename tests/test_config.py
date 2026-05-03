@@ -14,8 +14,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.mayor_model, "moonshotai/kimi-k2.6")
         self.assertEqual(settings.llm_max_tokens, 2048)
         self.assertEqual(settings.openrouter_reasoning_effort, "none")
-        self.assertEqual(settings.citizen_count, 5)
-        self.assertEqual(settings.citizen_worker_count, 5)
+        self.assertEqual(settings.citizen_count, 10)
+        self.assertEqual(settings.citizen_worker_count, 10)
         self.assertEqual(settings.season_seconds, 600)
 
 

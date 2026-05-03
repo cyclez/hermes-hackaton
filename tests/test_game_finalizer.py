@@ -12,7 +12,7 @@ from src.server.config import Settings
 from src.server.game_engine import create_initial_state
 from src.server.game_finalizer import GameFinalizer
 from src.server.game_loop import run_citizen_worker_loop, run_game_loop
-from src.server.models import CitizenAction, CitizenDecision, DecisionKind, Dossier, DossierTarget, GameEvent, JobKind
+from src.server.models import CitizenAction, CitizenDecision, DecisionKind, Dossier, DossierTarget, GameEvent, JobKind, StatusEffect, TimedStatus
 from src.server.queue import Job
 
 
@@ -33,10 +33,15 @@ class _LoopStore(_StubStore):
         super().__init__(events=events, dossiers=dossiers)
         self.state = state
         self.save_count = 0
+        self.load_count = 0
+        self.on_load = None
 
     async def load_state(self, game_id: str):
         if game_id != self.state.game_id:
             raise RuntimeError(f"unexpected game_id={game_id}")
+        self.load_count += 1
+        if self.on_load is not None:
+            self.on_load(self)
         return self.state
 
     async def save_state(self, state) -> None:
@@ -108,11 +113,23 @@ class _FakeLearningRunner(_FakeRunner):
 
     def learn_citizen_from_game(self, citizen_id: str, behavior: str, evidence: dict, game_id: str) -> dict:
         self.learning_calls.append(("citizen", citizen_id, evidence))
-        return {"ok": True, "final_response": "citizen learned"}
+        return {
+            "ok": True,
+            "completed": True,
+            "partial": False,
+            "error": None,
+            "final_response": "citizen learned",
+        }
 
     def learn_mayor_from_game(self, behavior: str, evidence: dict, game_id: str) -> dict:
         self.learning_calls.append(("mayor", "mayor", evidence))
-        return {"ok": True, "final_response": "mayor learned"}
+        return {
+            "ok": True,
+            "completed": True,
+            "partial": False,
+            "error": None,
+            "final_response": "mayor learned",
+        }
 
 
 class _BlockingLearningRunner(_FakeLearningRunner):
@@ -125,7 +142,25 @@ class _BlockingLearningRunner(_FakeLearningRunner):
         self.learning_calls.append(("citizen", citizen_id, evidence))
         self.started.set()
         self.release.wait(timeout=1.0)
-        return {"ok": True, "final_response": "citizen learned"}
+        return {
+            "ok": True,
+            "completed": True,
+            "partial": False,
+            "error": None,
+            "final_response": "citizen learned",
+        }
+
+
+class _PartialLearningRunner(_FakeLearningRunner):
+    def learn_citizen_from_game(self, citizen_id: str, behavior: str, evidence: dict, game_id: str) -> dict:
+        self.learning_calls.append(("citizen", citizen_id, evidence))
+        return {
+            "ok": False,
+            "completed": False,
+            "partial": True,
+            "error": "iteration budget exhausted",
+            "final_response": "summary only",
+        }
 
 
 def _settings() -> Settings:
@@ -137,6 +172,9 @@ def _settings() -> Settings:
         openrouter_reasoning_effort="none",
         llm_temperature=0.2,
         llm_max_tokens=2048,
+        learning_max_tokens=1024,
+        learning_max_iterations=6,
+        enable_postgame_training=True,
         citizens_model="moonshotai/kimi-k2-0905",
         mayor_model="moonshotai/kimi-k2.6",
         citizen_count=1,
@@ -162,6 +200,33 @@ async def _wait_until(predicate, timeout: float = 1.0) -> None:
 
 
 class GameFinalizerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_finalizer_skips_learning_when_training_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_store = DecisionLogStore(root / "logs")
+            runner = _FakeLearningRunner(log_store)
+            finalizer = GameFinalizer(
+                log_store=log_store,
+                runner=runner,
+                training_enabled=False,
+                root=root / "finalized",
+            )
+            state = create_initial_state(citizen_count=1, season_seconds=60)
+            state.game_id = "learning-disabled"
+            state.started_at = 0.0
+            state.now = 60.0
+
+            finalized = await finalizer.finalize_if_needed(_StubStore(), state.game_id, state)
+
+            self.assertTrue(finalized)
+            self.assertFalse(finalizer.is_learning_started(state.game_id))
+            self.assertEqual(runner.learning_calls, [])
+            self.assertFalse((root / "finalized" / state.game_id / "learning-completed.json").exists())
+            status = finalizer.learning_status(state.game_id, state_finished=True)
+            self.assertEqual(status["status"], "disabled")
+            self.assertEqual(status["completed_count"], 0)
+            self.assertEqual(status["total_count"], 0)
+
     async def test_finalizer_skips_unfinished_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -318,6 +383,49 @@ class GameFinalizerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["completed_count"], 2)
             self.assertEqual(status["total_count"], 2)
             self.assertIsNone(status["current_agent_id"])
+
+    async def test_finalizer_keeps_best_effort_learning_completed_when_one_agent_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_store = DecisionLogStore(root / "logs")
+            log_store.append("learning-partial", {
+                "log_id": "citizen-log",
+                "game_id": "learning-partial",
+                "ts": 123.0,
+                "role": "citizen",
+                "agent_id": "citizen-001",
+                "behavior": "stealth_first",
+                "situation": {
+                    "observation": {
+                        "global": {"heat": 50.0},
+                        "private": {"trace": 32.0, "stk": 500, "statuses": ["SURVEILLED"]},
+                        "allowed_actions": ["COVER_TRACKS"],
+                        "affordable_actions": ["COVER_TRACKS"],
+                    }
+                },
+                "final": {"payload": {"kind": "ACTION", "action": "COVER_TRACKS", "rationale": "self visible"}},
+            })
+            runner = _PartialLearningRunner(log_store)
+            finalizer = GameFinalizer(log_store=log_store, runner=runner, root=root / "finalized")
+            state = create_initial_state(citizen_count=1, season_seconds=60)
+            state.game_id = "learning-partial"
+            state.citizens["citizen-001"].behavior = "stealth_first"
+            state.started_at = 0.0
+            state.now = 60.0
+
+            await finalizer.finalize_if_needed(_StubStore(), state.game_id, state)
+            await _wait_until(lambda: (root / "finalized" / state.game_id / "learning-completed.json").exists())
+
+            completed_path = root / "finalized" / state.game_id / "learning-completed.json"
+            self.assertFalse((root / "finalized" / state.game_id / "learning-failed.json").exists())
+            completed = json.loads(completed_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(completed["results"]), 2)
+            self.assertFalse(completed["results"][0]["ok"])
+            self.assertTrue(completed["results"][1]["ok"])
+            status = finalizer.learning_status(state.game_id, state_finished=True)
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["completed_count"], 2)
+            self.assertEqual(status["total_count"], 2)
 
     async def test_finalizer_reports_running_learning_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -488,6 +596,82 @@ class GameFinalizerTests(unittest.IsolatedAsyncioTestCase):
             packet = json.loads((root / "finalized" / state.game_id / "terminal-packet.json").read_text(encoding="utf-8"))
             self.assertEqual(packet["winner"], "citizens")
             self.assertEqual(packet["reason"], "timeout_survived")
+
+    async def test_citizen_worker_converts_newly_jammed_turn_to_no_penalty_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_store = DecisionLogStore(root / "logs")
+            finalizer = GameFinalizer(log_store=log_store, root=root / "finalized")
+            state = create_initial_state(citizen_count=1, season_seconds=60)
+            state.game_id = "jammed-before-apply"
+            store = _LoopStore(state)
+            queue = _AsyncQueue([
+                Job(
+                    job_id="job-1",
+                    kind=JobKind.CITIZEN_DECISION,
+                    payload={
+                        "citizen_id": "citizen-001",
+                        "behavior": "aggressive",
+                        "game_id": state.game_id,
+                        "observation": {
+                            "citizen_id": "citizen-001",
+                            "game_hour": 1.0,
+                            "global": {"heat": 45.0, "season_seconds_remaining": 59.0},
+                            "private": {
+                                "mode": "MINE",
+                                "queued_mode": None,
+                                "statuses": [],
+                                "stk": 2500,
+                                "shiva": 35.0,
+                                "trace": 10.0,
+                                "action_cooldown_remaining": 0.0,
+                            },
+                            "allowed_actions": ["SNIFF", "JAM_SCAN", "DECOY_SIGNAL", "COVER_TRACKS"],
+                            "affordable_actions": ["SNIFF", "JAM_SCAN", "DECOY_SIGNAL", "COVER_TRACKS"],
+                            "allowed_modes": ["MINE", "SYNC", "SLEEP"],
+                            "action_tradeoffs": [],
+                            "selection_hint": "Factual observation only.",
+                        },
+                    },
+                )
+            ])
+            runner = _FakeRunner()
+            original_heat = state.heat
+            original_trace = state.citizens["citizen-001"].trace
+
+            def jam_on_second_load(loop_store: _LoopStore) -> None:
+                if loop_store.load_count == 2 and not loop_store.state.citizens["citizen-001"].has_status(StatusEffect.JAMMED, loop_store.state.now):
+                    loop_store.state.citizens["citizen-001"].statuses.append(
+                        TimedStatus(effect=StatusEffect.JAMMED, expires_at=loop_store.state.now + 30.0)
+                    )
+
+            store.on_load = jam_on_second_load
+            task = asyncio.create_task(
+                run_citizen_worker_loop(
+                    store,
+                    queue,
+                    runner,
+                    _settings(),
+                    asyncio.Semaphore(1),
+                    "worker-test",
+                    asyncio.Lock(),
+                    finalizer,
+                )
+            )
+
+            try:
+                await asyncio.wait_for(queue.completed_event.wait(), timeout=1.0)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+            self.assertEqual(queue.completed, ["job-1"])
+            self.assertEqual(queue.failed, [])
+            self.assertEqual(runner.calls, 1)
+            self.assertEqual(store.events[-1].kind, "hold")
+            self.assertIn("stale_hold (jammed_before_apply)", store.events[-1].payload["rationale"])
+            self.assertEqual(state.heat, original_heat)
+            self.assertEqual(state.citizens["citizen-001"].trace, original_trace)
 
 
 if __name__ == "__main__":

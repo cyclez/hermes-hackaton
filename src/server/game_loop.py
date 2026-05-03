@@ -7,7 +7,15 @@ from typing import TYPE_CHECKING
 
 from src.server.config import Settings
 from src.server.game_finalizer import GameFinalizer
-from src.server.game_engine import advance_tick, apply_citizen_decision, apply_mayor_decree, build_citizen_observation, due_citizens
+from src.server.game_engine import (
+    ACTION_RULES,
+    advance_tick,
+    apply_citizen_decision,
+    apply_mayor_decree,
+    build_citizen_observation,
+    build_mayor_context,
+    due_citizens,
+)
 from src.server.models import Citizen, CitizenDecision, DecisionKind, JobKind, StatusEffect, to_plain
 
 if TYPE_CHECKING:
@@ -152,7 +160,19 @@ async def run_citizen_worker_loop(
                     await queue.complete(job.job_id)
                     job = None
                     continue
-                result = apply_citizen_decision(state, decision, tick=0)
+                stale_reason = _stale_turn_hold_reason(state, state.citizens[citizen_id], decision, observation)
+                if stale_reason is not None:
+                    result = apply_citizen_decision(
+                        state,
+                        CitizenDecision(
+                            citizen_id=citizen_id,
+                            kind=DecisionKind.HOLD,
+                            rationale=f"server: stale_hold ({stale_reason})",
+                        ),
+                        tick=0,
+                    )
+                else:
+                    result = apply_citizen_decision(state, decision, tick=0)
                 await store.save_state(state)
                 if result.events:
                     await store.append_events(result.events, game_id)
@@ -162,7 +182,10 @@ async def run_citizen_worker_loop(
                 if state.is_finished:
                     await finalizer.finalize_if_needed(store, game_id, state)
 
-            print(f"[citizen_worker:{worker_id}] {citizen_id} → {decision.kind.value} {decision.action}", flush=True)
+            if stale_reason is not None:
+                print(f"[citizen_worker:{worker_id}] {citizen_id} → HOLD stale={stale_reason}", flush=True)
+            else:
+                print(f"[citizen_worker:{worker_id}] {citizen_id} → {decision.kind.value} {decision.action}", flush=True)
             await queue.complete(job.job_id)
             job = None
 
@@ -213,15 +236,7 @@ async def run_mayor_worker_loop(
                 "active_citizens": list(state.citizens.keys()),
             }
             allowed_targets = set(state.citizens.keys())
-            context_snapshot = {
-                "kind": "mayor_context",
-                "heat": dossier_dict["heat"],
-                "game_hour": dossier_dict["game_hour"],
-                "recent_actions": dossier_dict["recent_actions"],
-                "recent_evidence": _recent_evidence_summary(dossiers),
-                "active_citizens": dossier_dict["active_citizens"],
-                "citizen_snapshots": [_citizen_snapshot(citizen, state.now) for citizen in state.citizens.values()],
-            }
+            context_snapshot = build_mayor_context(state, dossiers, recent_events)
 
             async with semaphore:
                 decree = await loop.run_in_executor(
@@ -250,30 +265,45 @@ async def run_mayor_worker_loop(
         except Exception:
             print(f"[mayor_worker] error:\n{traceback.format_exc()}")
 
+def _stale_turn_hold_reason(
+    state,
+    citizen: Citizen,
+    decision: CitizenDecision,
+    observation: dict,
+) -> str | None:
+    private = observation.get("private") or {}
+    observed_statuses = set(private.get("statuses") or [])
+    observed_actions = set(observation.get("allowed_actions") or [])
+    observed_modes = set(observation.get("allowed_modes") or [])
+    observed_affordable = set(observation.get("affordable_actions") or [])
+    observed_cooldown = float(private.get("action_cooldown_remaining") or 0.0)
 
-def _citizen_snapshot(citizen: Citizen, now: float) -> dict[str, object]:
-    return {
-        "citizen_id": citizen.citizen_id,
-        "behavior": citizen.behavior,
-        "mode": citizen.mode.value,
-        "queued_mode": citizen.queued_mode.value if citizen.queued_mode else None,
-        "statuses": [status.effect.value for status in citizen.active_statuses(now)],
-        "stk": int(citizen.stk),
-        "shiva": round(citizen.shiva, 2),
-        "trace": round(citizen.trace, 2),
-        "action_cooldown_remaining": round(max(0.0, citizen.action_cooldown_until - now), 2),
-    }
+    if decision.kind == DecisionKind.HOLD:
+        return None
 
+    if decision.kind == DecisionKind.MODE_CHANGE and decision.mode is not None:
+        if decision.mode.value not in observed_modes:
+            return None
+        if citizen.has_status(StatusEffect.JAILED, state.now) and StatusEffect.JAILED.value not in observed_statuses:
+            return "jailed_before_apply"
+        if citizen.has_status(StatusEffect.JAMMED, state.now) and StatusEffect.JAMMED.value not in observed_statuses:
+            return "jammed_before_apply"
+        return None
 
-def _recent_evidence_summary(dossiers: list) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for dossier in dossiers:
-        for target in dossier.targets:
-            rows.append({
-                "citizen_id": target.citizen_id,
-                "action": target.action.value,
-                "p_catch": round(target.p_catch, 3),
-                "trace": round(target.trace, 2),
-                "shiva": round(target.shiva, 2),
-            })
-    return rows
+    if decision.kind == DecisionKind.ACTION and decision.action is not None:
+        action_name = decision.action.value
+        if action_name not in observed_actions or action_name not in observed_affordable:
+            return None
+        if citizen.has_status(StatusEffect.JAILED, state.now) and StatusEffect.JAILED.value not in observed_statuses:
+            return "jailed_before_apply"
+        if citizen.has_status(StatusEffect.JAMMED, state.now) and StatusEffect.JAMMED.value not in observed_statuses:
+            return "jammed_before_apply"
+        if citizen.action_cooldown_until > state.now and observed_cooldown <= 0.0:
+            return "cooldown_started_before_apply"
+        if citizen.stk < ACTION_RULES[decision.action]["stk_cost"]:
+            observed_stk = float(private.get("stk") or 0.0)
+            if observed_stk >= ACTION_RULES[decision.action]["stk_cost"]:
+                return "stk_drained_before_apply"
+        return None
+
+    return None

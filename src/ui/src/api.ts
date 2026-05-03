@@ -24,7 +24,7 @@ export interface TrainingResult {
 
 export interface TrainingStatus {
   game_id: string
-  status: 'idle' | 'pending' | 'running' | 'completed' | 'failed'
+  status: 'idle' | 'disabled' | 'pending' | 'running' | 'completed' | 'failed'
   started_at: number | null
   completed_at: number | null
   failed_at: number | null

@@ -45,6 +45,15 @@ def _env_float(name: str, env_file: dict[str, str], default: float) -> float:
         return default
 
 
+def _env_bool(name: str, env_file: dict[str, str], default: bool) -> bool:
+    value = _env(name, env_file, "true" if default else "false").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class Settings:
     llm_provider: str
@@ -54,6 +63,9 @@ class Settings:
     openrouter_reasoning_effort: str
     llm_temperature: float
     llm_max_tokens: int
+    learning_max_tokens: int
+    learning_max_iterations: int
+    enable_postgame_training: bool
     citizens_model: str
     mayor_model: str
     citizen_count: int
@@ -84,6 +96,9 @@ class Settings:
             openrouter_reasoning_effort=_env("OPENROUTER_REASONING_EFFORT", env_file, "none").lower(),
             llm_temperature=max(0.0, min(_env_float("LLM_TEMPERATURE", env_file, 0.2), 2.0)),
             llm_max_tokens=max(32, _env_int("LLM_MAX_TOKENS", env_file, 220)),
+            learning_max_tokens=max(256, _env_int("LEARNING_MAX_TOKENS", env_file, 1024)),
+            learning_max_iterations=max(2, _env_int("LEARNING_MAX_ITERATIONS", env_file, 6)),
+            enable_postgame_training=_env_bool("ENABLE_POSTGAME_TRAINING", env_file, True),
             citizens_model=_env("CITIZENS_MODEL", env_file, "llama3.2:1b"),
             mayor_model=_env("MAYOR_MODEL", env_file, "llama3.2:1b"),
             citizen_count=max(1, _env_int("CITIZEN_COUNT", env_file, 5)),

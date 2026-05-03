@@ -11,6 +11,7 @@ const MODE_COLORS: Record<string, string> = {
 const STATUS_COLORS: Record<string, string> = {
   JAILED: '#ff6c67',
   SURVEILLED: '#ff9f5c',
+  MOST_WANTED: '#ff6fa8',
   JAMMED: '#f2c66c',
   GHOSTED: '#7de2ff',
   PROTECTED: '#7fd8a8',
@@ -63,6 +64,7 @@ export function CitizenCard({ citizen, now }: Props) {
   const isJailed = statuses.includes('JAILED')
   const isJammed = statuses.includes('JAMMED')
   const isSurveilled = statuses.includes('SURVEILLED')
+  const isMostWanted = statuses.includes('MOST_WANTED')
 
   let readinessLabel = 'Action-ready'
   if (isJailed) readinessLabel = 'Execution frozen'
@@ -74,6 +76,9 @@ export function CitizenCard({ citizen, now }: Props) {
   if (isJailed) {
     riskLabel = 'Lockdown'
     riskColor = '#ff6c67'
+  } else if (isMostWanted) {
+    riskLabel = 'Most wanted'
+    riskColor = '#ff6fa8'
   } else if (citizen.trace >= 65 || isSurveilled) {
     riskLabel = 'High trace'
     riskColor = '#ff9f5c'

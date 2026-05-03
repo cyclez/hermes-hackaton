@@ -7,8 +7,23 @@ from src.server.models import to_plain
 
 _VISIBLE_MAYOR_EFFECTS = {
     "JAILED", "JAMMED", "SURVEILLED", "PROTECTED",
-    "JAIL", "JAM", "SURVEIL", "TRACE_MARK", "STK_DRAIN", "SHIVA_THROTTLE",
-    "ACTION_BAN", "MOST_WANTED", "CURFEW", "AUDIT_PULSE",
+    "JAIL", "JAM", "SURVEIL", "STK_DRAIN", "MOST_WANTED", "CURFEW",
+}
+
+_CITIZEN_ACTION_LESSONS = {
+    "SNIFF": "Successful `SNIFF` can create a `GHOSTED` window before a higher-commitment action.",
+    "JAM_SCAN": "When STK is available, successful `JAM_SCAN` can buy shared breathing room by lowering catch pressure.",
+    "DECOY_SIGNAL": "Use `DECOY_SIGNAL` against live `SURVEILLED` pressure or to open a short anti-`SURVEIL` window, not as a generic safety button.",
+    "COVER_TRACKS": "When trace is already elevated, `COVER_TRACKS` can preserve survival better than forcing another exposed action.",
+}
+
+_MAYOR_ACTION_LESSONS = {
+    "SURVEIL": "Use `SURVEIL` as first-contact pressure on clean targets, not as a repeat decree into protected or already-targeted citizens.",
+    "JAIL": "Use `JAIL` to convert strong evidence or terminal urgency into reliable tempo denial.",
+    "JAM": "Use `JAM` when a citizen is cycling safe actions and a short full lock is worth more than soft pressure.",
+    "STK_DRAIN": "Use `STK_DRAIN` on high-STK repeat operators; it cuts tempo and adds trace immediately.",
+    "MOST_WANTED": "Escalate to `MOST_WANTED` when ordinary surveillance is no longer enough; it adds ongoing trace pressure.",
+    "CURFEW": "Use `CURFEW` as Heat tempo support when targeted decrees are thin, not as a replacement for enforcement.",
 }
 
 
@@ -36,14 +51,15 @@ def build_citizen_learning_evidence(
         "behavior": _citizen_behavior(citizen_id, terminal_packet, decision_logs),
         "public_outcome": _public_outcome(terminal_packet),
         "own_final_snapshot": _own_final_snapshot(citizen_id, terminal_packet),
+        "candidate_lessons": _citizen_candidate_lessons(citizen_id, terminal_packet, events),
         "own_decision_summary": {
             "turn_count": len(own_turns),
             "actions": dict(Counter(turn.get("action") for turn in own_turns if turn.get("action"))),
             "kinds": dict(Counter(turn.get("kind") for turn in own_turns if turn.get("kind"))),
-            "blocked_turns": [turn for turn in own_turns if turn.get("blocked")],
+            "blocked_turn_count": sum(1 for turn in own_turns if turn.get("blocked")),
         },
-        "own_turns": own_turns[-20:],
-        "visible_events": visible_events[-40:],
+        "own_turns": own_turns[-12:],
+        "visible_events": visible_events[-24:],
         "visibility_contract": [
             "Only this citizen's decisions, observations, resources, statuses, public heat, final result, and visible effects are included.",
             "Mayor dossiers, Mayor private rationale, other citizens' private state, hidden probabilities, and omniscient causal explanations are excluded.",
@@ -75,14 +91,15 @@ def build_mayor_learning_evidence(
         "behavior": _mayor_behavior(decision_logs),
         "public_outcome": _public_outcome(terminal_packet),
         "final_citizen_snapshots": terminal_packet.get("citizen_snapshots", []),
+        "candidate_lessons": _mayor_candidate_lessons(events),
         "decree_summary": {
             "turn_count": len(mayor_turns),
             "actions": dict(Counter(turn.get("action") for turn in mayor_turns if turn.get("action"))),
             "targets": dict(Counter(target for turn in mayor_turns for target in turn.get("targets", []))),
         },
-        "mayor_turns": mayor_turns[-20:],
-        "caught_evidence": dossier_rows[-20:],
-        "public_action_flow": public_actions[-60:],
+        "mayor_turns": mayor_turns[-12:],
+        "caught_evidence": dossier_rows[-12:],
+        "public_action_flow": public_actions[-30:],
         "heat_trajectory": _heat_trajectory(terminal_packet, events),
         "visibility_contract": [
             "Mayor evidence is limited to Mayor-visible decrees, rationales, dossiers, context snapshots, public actions, Heat trajectory, and final result.",
@@ -113,7 +130,7 @@ def _citizen_turn_summary(entry: dict[str, Any]) -> dict[str, Any] | None:
         "kind": final_payload.get("kind"),
         "action": final_payload.get("action"),
         "mode": final_payload.get("mode"),
-        "rationale": final_payload.get("rationale"),
+        "rationale": _clip_text(final_payload.get("rationale"), 140),
         "blocked": bool("JAILED" in statuses or "JAMMED" in statuses or mode == "SLEEP" or cooldown > 0),
     }
 
@@ -126,13 +143,13 @@ def _mayor_turn_summary(entry: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "heat": situation.get("heat") or (situation.get("dossier") or {}).get("heat"),
         "game_hour": situation.get("game_hour") or (situation.get("dossier") or {}).get("game_hour"),
-        "recent_actions": situation.get("recent_actions") or (situation.get("dossier") or {}).get("recent_actions") or [],
-        "recent_evidence": situation.get("recent_evidence") or (situation.get("dossier") or {}).get("recent_evidence") or [],
-        "citizen_snapshots": situation.get("citizen_snapshots", []),
+        "recent_actions": (situation.get("recent_actions") or (situation.get("dossier") or {}).get("recent_actions") or [])[-6:],
+        "recent_evidence": (situation.get("recent_evidence") or (situation.get("dossier") or {}).get("recent_evidence") or [])[-6:],
+        "citizen_snapshots": (situation.get("citizen_snapshots") or [])[-10:],
         "action": final_payload.get("action"),
         "targets": final_payload.get("targets") or [],
         "duration_seconds": final_payload.get("duration_seconds"),
-        "rationale": final_payload.get("rationale"),
+        "rationale": _clip_text(final_payload.get("rationale"), 140),
     }
 
 
@@ -160,7 +177,7 @@ def _citizen_visible_event(citizen_id: str, event: Any) -> dict[str, Any] | None
     return {
         "game_hour": row.get("game_hour"),
         "kind": row.get("kind"),
-        "message": row.get("message") if public or target_id == citizen_id or citizen_id in targets else None,
+        "message": _clip_text(row.get("message"), 140) if public or target_id == citizen_id or citizen_id in targets else None,
         "payload": safe_payload,
     }
 
@@ -185,7 +202,7 @@ def _heat_trajectory(terminal_packet: dict[str, Any], events: list[Any]) -> dict
         if "heat" in payload:
             samples.append({"game_hour": row.get("game_hour"), "heat": payload.get("heat"), "kind": row.get("kind")})
     return {
-        "samples": samples[-40:],
+        "samples": samples[-30:],
         "final_heat": terminal_packet.get("final_heat"),
         "elapsed": terminal_packet.get("elapsed"),
     }
@@ -193,6 +210,89 @@ def _heat_trajectory(terminal_packet: dict[str, Any], events: list[Any]) -> dict
 
 def _public_outcome(packet: dict[str, Any]) -> dict[str, Any]:
     return _select(packet, ["winner", "reason", "final_heat", "elapsed", "season_seconds"])
+
+
+def _citizen_candidate_lessons(
+    citizen_id: str,
+    packet: dict[str, Any],
+    events: list[Any],
+) -> list[dict[str, str]]:
+    counts: Counter[tuple[str, bool]] = Counter()
+    for event in _chronological(events):
+        row = _plain(event)
+        if row.get("kind") != "citizen_action":
+            continue
+        payload = row.get("payload") or {}
+        if payload.get("citizen_id") != citizen_id:
+            continue
+        action = str(payload.get("action") or "").strip()
+        if not action:
+            continue
+        counts[(action, bool(payload.get("caught")))] += 1
+
+    ranked_actions: list[tuple[str, int, int]] = []
+    for action, lesson in _CITIZEN_ACTION_LESSONS.items():
+        successes = counts.get((action, False), 0)
+        failures = counts.get((action, True), 0)
+        if successes <= 0:
+            continue
+        ranked_actions.append((action, successes, failures))
+    ranked_actions.sort(key=lambda item: (-item[1], item[2], item[0]))
+
+    candidates: list[dict[str, str]] = []
+    for action, successes, failures in ranked_actions[:2]:
+        candidates.append({
+            "pattern": _CITIZEN_ACTION_LESSONS[action],
+            "support": f"{successes} uncaught and {failures} caught `{action}` actions in this game.",
+            "source": "successful_action_pattern",
+        })
+
+    snapshot = _own_final_snapshot(citizen_id, packet) or {}
+    statuses = set(snapshot.get("statuses") or [])
+    mode = snapshot.get("mode")
+    shiva = float(snapshot.get("shiva") or 0.0)
+    trace = float(snapshot.get("trace") or 0.0)
+    if len(candidates) < 3 and mode == "SYNC" and shiva >= 60.0 and trace <= 20.0 and "JAILED" not in statuses:
+        candidates.append({
+            "pattern": "Late in a hostile board, `SYNC` plus high `SHIVA` can hold a survivable posture without feeding extra catches.",
+            "support": f"Final snapshot ended in `SYNC` with SHIVA {shiva:.2f} and trace {trace:.2f}.",
+            "source": "stable_endgame_posture",
+        })
+
+    return candidates[:3]
+
+
+def _mayor_candidate_lessons(events: list[Any]) -> list[dict[str, str]]:
+    applied_counts: Counter[str] = Counter()
+    blocked_counts: Counter[str] = Counter()
+    for event in _chronological(events):
+        row = _plain(event)
+        if row.get("kind") != "mayor_decree":
+            continue
+        payload = row.get("payload") or {}
+        action = str(payload.get("action") or "").strip()
+        if not action:
+            continue
+        if payload.get("applied") is True:
+            applied_counts[action] += 1
+        else:
+            blocked_counts[action] += 1
+
+    ranked = [
+        (action, count, blocked_counts.get(action, 0))
+        for action, count in applied_counts.items()
+        if action in _MAYOR_ACTION_LESSONS
+    ]
+    ranked.sort(key=lambda item: (-item[1], item[2], item[0]))
+
+    candidates: list[dict[str, str]] = []
+    for action, applied, blocked in ranked[:3]:
+        candidates.append({
+            "pattern": _MAYOR_ACTION_LESSONS[action],
+            "support": f"`{action}` applied {applied} times and was blocked {blocked} times in this game.",
+            "source": "applied_decree_pattern",
+        })
+    return candidates
 
 
 def _own_final_snapshot(citizen_id: str, packet: dict[str, Any]) -> dict[str, Any] | None:
@@ -217,6 +317,15 @@ def _mayor_behavior(logs: list[dict[str, Any]]) -> str | None:
         if entry.get("role") == "mayor":
             return entry.get("behavior")
     return None
+
+
+def _clip_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _select(mapping: dict[str, Any], keys: list[str]) -> dict[str, Any]:

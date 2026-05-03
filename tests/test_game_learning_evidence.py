@@ -54,7 +54,10 @@ class GameLearningEvidenceTests(unittest.TestCase):
             GameEvent("e1", 1, 10.0, "citizen_action", "other citizen acted", {
                 "citizen_id": "citizen-002", "action": "SNIFF", "p_catch": 0.99, "heat": 65.0,
             }),
-            GameEvent("e2", 2, 11.0, "mayor_decree", "Mayor pressure affected you", {
+            GameEvent("e2", 2, 10.5, "citizen_action", "you recovered cleanly", {
+                "citizen_id": "citizen-001", "action": "COVER_TRACKS", "caught": False, "heat": 58.0,
+            }),
+            GameEvent("e3", 3, 11.0, "mayor_decree", "Mayor pressure affected you", {
                 "targets": ["citizen-001", "citizen-002"], "action": "SURVEIL", "rationale": "private mayor rationale",
             }),
         ]
@@ -65,6 +68,8 @@ class GameLearningEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["agent_id"], "citizen-001")
         self.assertEqual(evidence["behavior"], "stealth_first")
         self.assertEqual(len(evidence["own_turns"]), 1)
+        self.assertEqual(len(evidence["candidate_lessons"]), 1)
+        self.assertIn("COVER_TRACKS", evidence["candidate_lessons"][0]["pattern"])
         self.assertIn("COVER_TRACKS", evidence["own_decision_summary"]["actions"])
         self.assertNotIn("citizen-002', 'behavior", text)
         self.assertNotIn("secret mayor reason", text)
@@ -86,12 +91,17 @@ class GameLearningEvidenceTests(unittest.TestCase):
                 DossierTarget("citizen-001", CitizenAction.SNIFF, 0.7, 45.0, 30.0, "caught sniff")
             ])
         ]
-        events = [GameEvent("e1", 1, 10.0, "citizen_action", "caught", {"citizen_id": "citizen-001", "action": "SNIFF", "caught": True, "heat": 82.0})]
+        events = [
+            GameEvent("e1", 1, 10.0, "citizen_action", "caught", {"citizen_id": "citizen-001", "action": "SNIFF", "caught": True, "heat": 82.0}),
+            GameEvent("e2", 2, 11.0, "mayor_decree", "Mayor applied SURVEIL to citizen-001.", {"target": "citizen-001", "action": "SURVEIL", "applied": True, "blocked_reason": None}),
+        ]
 
         evidence = build_mayor_learning_evidence(packet, logs, events, dossiers)
 
         text = repr(evidence)
         self.assertEqual(evidence["agent_id"], "mayor")
+        self.assertEqual(len(evidence["candidate_lessons"]), 1)
+        self.assertIn("SURVEIL", evidence["candidate_lessons"][0]["pattern"])
         self.assertIn("JAIL", evidence["decree_summary"]["actions"])
         self.assertIn("citizen-001", evidence["decree_summary"]["targets"])
         self.assertIn("repeated caught action", text)

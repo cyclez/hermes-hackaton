@@ -100,6 +100,8 @@ function LlmIndicator({ lastLlmAt }: { lastLlmAt: number | null }) {
 
 function trainingTone(training: TrainingStatus): string {
   switch (training.status) {
+    case 'disabled':
+      return '#94a3b8'
     case 'running':
     case 'pending':
       return '#f59e0b'
@@ -114,6 +116,8 @@ function trainingTone(training: TrainingStatus): string {
 
 function trainingLabel(training: TrainingStatus): string {
   switch (training.status) {
+    case 'disabled':
+      return 'OFF'
     case 'pending':
       return 'QUEUEING'
     case 'running':
@@ -129,6 +133,8 @@ function trainingLabel(training: TrainingStatus): string {
 
 function trainingMeta(training: TrainingStatus): string {
   switch (training.status) {
+    case 'disabled':
+      return 'post-game training disabled'
     case 'pending':
       return 'post-game learner queued'
     case 'running':
